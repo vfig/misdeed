@@ -1,0 +1,10 @@
+# MSVC junk:
+*.exe
+*.ilk
+*.obj
+*.pdb
+.vs/
+
+# My junk:
+*.mis
+/clargs
