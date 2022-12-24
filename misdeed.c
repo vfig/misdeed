@@ -355,23 +355,7 @@ DBFile *dbfile_free(DBFile *dbfile) {
     return NULL;
 }
 
-// TODO: cleanup:
-#if 0
-typedef struct MisChunk {
-    char name[12];
-    LGDBVersion version;
-    uint32 size;
-    char *data;
-} MisChunk;
-
-typedef struct MisInfo {
-    char filename[1024];
-    size_t data_size;
-    char *data;
-
-    uint32 chunk_count;
-    MisChunk chunks[MAX_CHUNKS];
-} MisInfo;
+/** WorldRep stuff */
 
 #define MAX_CELLS 32678UL           // Imposed by Dromed
 #define MAX_VERTICES (256UL*1024UL) // Imposed by Dromed
@@ -401,117 +385,8 @@ typedef struct WorldRep {
     WorldRepCell cells[MAX_CELLS];
 } WorldRep;
 
-int mis_get_chunk(MisInfo *mis, char *tag, char **pdata, uint32 *psize, LGDBVersion *pversion) {
-    for (uint32 i=0; i<mis->chunk_count; ++i) {
-        MisChunk *chunk = &(mis->chunks[i]);
-        if (strncmp(chunk->name, tag, 12)==0) {
-            *pdata = chunk->data;
-            *psize = chunk->size;
-            *pversion = chunk->version;
-            return 1;
-        }
-    }
-    *pdata = 0;
-    *psize = 0;
-    memset(pversion, 0, sizeof(*pversion));
-    return 0;
-}
-
-MisInfo *load_mis(char *filename) {
-    MisInfo *mis = (MisInfo *)malloc(sizeof(MisInfo));
-    strncpy(mis->filename, filename, sizeof(mis->filename)-1);
-    mis->filename[sizeof(mis->filename)-1] = 0;
-
-    // Load the whole file into memory:
-    FILE *file = fopen(filename, "rb");
-    fseek(file, 0, SEEK_END);
-    mis->data_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    mis->data = malloc(mis->data_size);
-    assert(mis->data);
-    size_t n = fread(mis->data, mis->data_size, 1, file);
-    assert(n==1);
-    fclose(file);
-
-    // Read the TOC:
-    LGDBFileHeader *header = (LGDBFileHeader *)(mis->data);
-    assert(memcmp(header->deadbeef, DEADBEEF, sizeof(DEADBEEF))==0);
-    assert(header->version.major==0);
-    assert(header->version.minor==1);
-
-    mis->chunk_count = *(uint32 *)(mis->data+header->table_offset);
-    LGDBTOCEntry *toc = (LGDBTOCEntry *)(mis->data+header->table_offset+sizeof(uint32));
-    for (uint32 i=0; i<mis->chunk_count; ++i) {
-        LGDBTOCEntry *entry = &toc[i];
-        MisChunk *chunk = &(mis->chunks[i]);
-        memcpy(chunk, entry->name, sizeof(chunk->name));
-        chunk->size = entry->data_size;
-        LGDBChunkHeader *chunk_header = (LGDBChunkHeader *)(mis->data+entry->offset);
-        chunk->version = chunk_header->version;
-        assert(memcmp(entry->name, chunk_header->name, sizeof(entry->name))==0);
-        uint32 offset = entry->offset+sizeof(LGDBChunkHeader);
-        chunk->data = (mis->data+offset);
-    }
-
-    #if 1
-    dump("INDEX\tCHUNK\t\tOFFSET\t\tSIZE\n");
-    for (uint32 i=0; i<mis->chunk_count; ++i) {
-        MisChunk *chunk = &(mis->chunks[i]);
-        uint32 offset = (uint32)(chunk->data-mis->data);
-        dump("%d\t%-12s\t0x%08lx\t0x%08lx\n", i, chunk->name, offset, chunk->size);
-    }
-    #endif
-
-    return mis;
-}
 
 #if 0
-int write_mis(MisInfo *mis, char *filename) {
-    char temp_filename[1024];
-    strcpy(temp_filename, filename);
-    strcat(temp_filename, "~tmp");
-    FILE *file = fopen(temp_filename, "wb");
-    size_t n;
-
-    // TODO: version
-    LGDBFileHeader header = {0};
-    header.version.major = 0;
-    header.version.minor = 1;
-    memcpy(header.deadbeef, DEADBEEF, sizeof(DEADBEEF));
-
-    n = fwrite(&header, sizeof(header), 1, file); assert(n==1);
-    for (int i=0; i<mis->chunk_count; ++i) {
-        MisChunk *chunk = &(mis->chunks[i]);
-
-// typedef struct MisChunk {
-//     char name[12];
-//     LGDBVersion version;
-//     uint32 size;
-//     uint32 offset;
-//     char *data;
-// } MisChunk;
-
-// typedef struct MisInfo {
-//     char filename[1024];
-//     size_t data_size;
-//     char *data;
-
-//     uint32 chunk_count;
-//     MisChunk chunks[MAX_CHUNKS];
-// } MisInfo;
-
-    }
-
-    ...
-
-    uint32 toc_offset = (uint32)ftell(file);
-    write_toc();
-    fseek(file, 0, SEEK_SET);
-    n = fwrite(&toc_offset, sizeof(toc_offset), 1, file); assert(n==1);
-    fclose(file);
-    rename(temp_filename, filename);
-}
-#endif
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -612,64 +487,10 @@ void mis_read_wrext(MisInfo *mis) {
     }
 }
 
-#if 0
-MisInfo *copy_only_worldrep(MisInfo *in) {
-    MisInfo *out = (MisInfo *)malloc(sizeof(MisInfo));
-    memset(out, 0, sizeof(MisInfo);
-
-.................
-
-typedef struct LGDBFileHeader {
-    uint32 table_offset;
-    LGDBVersion version;
-    uint8 pad[256];
-    char deadbeef[4];
-} LGDBFileHeader;
-
-typedef struct LGDBTOCEntry {
-    char name[12];
-    uint32 offset;
-    uint32 data_size;
-} LGDBTOCEntry;
-
-typedef struct LGDBChunkHeader {
-    char name[12];
-    LGDBVersion version;
-    uint32 pad;
-} LGDBChunkHeader;
-
-    out->data_size = sizeof(LGDBFileHeader);
-
-    char *wrext;
-    uint32 wrext_size;
-    LGDBVersion wrext_version;
-    assert(mis_get_chunk(mis, "WREXT", &wrext, &wrext_size, &wrext_version));
-
-    ++out->chunk_count;
-    out->data_size += sizeof(LGDBChunkHeader)+wrext_size;
-
-    out->data_size += sizeof(uint32);
-    out->data_size += out->chunk_count*sizeof(LGDBTOCEntry);
-
-
-    typedef struct MisInfo {
-        char filename[1024];
-        size_t data_size;
-        char *data;
-
-        uint32 chunk_count;
-        MisChunk chunks[MAX_CHUNKS];
-} MisInfo;
-
-}
-#endif
-
 #endif
 
 int main(int argc, char *argv[]) {
-    //MisInfo *mis = load_mis("miss20_low.mis");
     //mis_read_wrext(mis);
-    //write_mis(mis, "deed.mis", keep_only_worldrep);
 
     DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1.mis");
     dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
