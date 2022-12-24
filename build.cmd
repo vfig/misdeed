@@ -25,12 +25,13 @@ if errorlevel 1 (
 )
 
 rem Log important settings
-echo:basedir = %basedir%
-echo:srcdir = %srcdir%
-echo:builddir = %builddir%
-echo:
+rem echo:basedir = %basedir%
+rem echo:srcdir = %srcdir%
+rem echo:builddir = %builddir%
+rem echo:
 
 echo:> %clargs%
+echo /nologo >> %clargs%
 rem Debug configuration
 echo /Od >> %clargs%
 echo /DDEBUG=1 >> %clargs%
@@ -41,7 +42,7 @@ echo /D_CRT_SECURE_NO_WARNINGS=1 >> %clargs%
 echo /Zi >> %clargs%
 echo /Fd:%builddir%\misdeed.pdb >> %clargs%
 echo /MD >> %clargs%
-echo /fsanitize=address >> %clargs%
+rem echo /fsanitize=address >> %clargs%
 rem Output configuration
 echo /Fo:%builddir%\ >> %clargs%
 rem Compile configuration
