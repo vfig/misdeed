@@ -6,6 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
+
+/** useful shit **/
+
 typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
@@ -16,9 +21,33 @@ typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef float float32;
 
+#undef assert
+
+#define assert(condition) \
+    if (!(condition)) { \
+        fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
+        abort(); \
+    }
+
+#define assert_message(condition, message) \
+    if (!(condition)) { \
+        fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
+        fprintf(stderr, "\t%s\n", message); \
+        abort(); \
+    }
+
+#define assert_format(condition, fmt, ...) \
+    if (!(condition)) { \
+        fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
+        fprintf(stderr, "\t" fmt "\n", __VA_ARGS__); \
+        abort(); \
+    }
+
 /** .MIS data types **/
 
 #pragma pack(push, 1)
+
+static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 
 typedef struct LGVector {
     float32 x, y, z;
@@ -35,6 +64,10 @@ typedef struct LGDBFileHeader {
     uint8 pad[256];
     char deadbeef[4];
 } LGDBFileHeader;
+
+typedef struct LGDBTOCHeader {
+    uint32 entry_count;
+} LGDBTOCHeader;
 
 typedef struct LGDBTOCEntry {
     char name[12];
@@ -136,26 +169,150 @@ typedef struct LGWRLightMapInfo {
 
 /** Caution: misdeeds ahead! **/
 
-#define assert(condition) \
-    if (!(condition)) { \
-        fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
-        abort(); \
+#define FILENAME_SIZE 1024
+typedef struct {
+    char value[FILENAME_SIZE];
+} FileName;
+
+static FileName *filename_copy_str(FileName *dest, const char *src) {
+    strncpy(dest->value, src, FILENAME_SIZE);
+    assert(dest->value[FILENAME_SIZE-1]==0);
+    return dest;
+}
+
+typedef struct DBTagBlockName {
+    char value[12];
+} DBTagBlockName;
+
+typedef struct DBTagBlock {
+    DBTagBlockName name;
+    LGDBVersion version;
+    uint32 size;
+    char *data;
+} DBTagBlock;
+
+typedef struct {
+    DBTagBlockName key;
+    int value; // index into tagblock_array;
+} DBTagBlockIndexEntry;
+
+typedef struct DBFile {
+    FileName filename;
+    LGDBVersion version;
+    DBTagBlock *tagblock_array;
+    DBTagBlockIndexEntry *index_hash;
+} DBFile;
+
+static int tag_name_eq(DBTagBlockName name0, DBTagBlockName name1) {
+    return (memcmp(&name0, &name1, sizeof(DBTagBlockName))==0);
+}
+
+static DBTagBlockName tag_name_from_str(const char *src) {
+    DBTagBlockName dest;
+    strncpy(dest.value, src, (sizeof dest.value)/(sizeof dest.value[0]));
+    return dest;
+}
+
+static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
+    DBTagBlockName name = tag_name_from_str(name_str);
+    int i = (int)hmgeti(dbfile->index_hash, name);
+    if (i<0) {
+        return NULL;
+    } else {
+        int j = dbfile->index_hash[i].value;
+        return &dbfile->tagblock_array[j];
+    }
+}
+
+DBFile *dbfile_load(const char *filename) {
+    DBFile *dbfile = calloc(1, sizeof(DBFile));
+    filename_copy_str(&(dbfile->filename), filename);
+
+    FILE *file = fopen(filename, "rb");
+    #define READ_SIZE(buf, size) \
+        do { \
+        size_t n = fread(&buf, sizeof(buf), 1, file); \
+        assert(n==1); \
+        } while(0)
+    #define READ(buf) READ_SIZE(buf, sizeof(buf))
+
+    LGDBFileHeader header;
+    READ(header);
+    assert_message(
+        memcmp(header.deadbeef, DEADBEEF, sizeof(DEADBEEF))==0,
+        "Wrong file type (missing DEADBEEF)");
+    assert_format(
+        header.version.major==0 && header.version.minor==1,
+        "Unsupported file version %d.%d",
+        header.version.major, header.version.minor);
+    dbfile->version = header.version;
+
+    fseek(file, header.table_offset, SEEK_SET);
+    LGDBTOCHeader toc_header;
+    READ(toc_header);
+
+    arrsetlen(dbfile->tagblock_array, toc_header.entry_count);
+    for (int i=0, iend=(int)arrlen(dbfile->tagblock_array); i<iend; ++i) {
+        DBTagBlock *tagblock = &dbfile->tagblock_array[i];
+
+        LGDBTOCEntry toc_entry;
+        READ(toc_entry);
+        tagblock->name = tag_name_from_str(toc_entry.name);
+        tagblock->size = toc_entry.data_size;
+        tagblock->data = NULL;
+
+        LGDBChunkHeader chunk_header;
+        uint32 position = (uint32)ftell(file);
+        fseek(file, toc_entry.offset, SEEK_SET);
+        READ(chunk_header);
+        assert(tag_name_eq(tagblock->name, tag_name_from_str(chunk_header.name)));
+        tagblock->version = chunk_header.version;
+        if (tagblock->size>0) {
+            tagblock->data = malloc(tagblock->size);
+            READ_SIZE(tagblock->data, tagblock->size);
+        }
+        fseek(file, position, SEEK_SET);
     }
 
-void dump(char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+    for (int i=0, iend=(int)arrlen(dbfile->tagblock_array); i<iend; ++i) {
+        DBTagBlock *tagblock = &dbfile->tagblock_array[i];
+        hmput(dbfile->index_hash, tagblock->name, i);
+    }
+
+    #undef READ
+    #undef READ_SIZE
+    fclose(file);
+
+    return dbfile;
 }
+
+DBFile *dbfile_free(DBFile *dbfile) {
+    for (int i=0, iend=(int)arrlen(dbfile->tagblock_array); i<iend; ++i) {
+        DBTagBlock *tagblock = &dbfile->tagblock_array[i];
+        free(tagblock->data);
+    }
+    arrfree(dbfile->tagblock_array);
+    hmfree(dbfile->index_hash);
+    free(dbfile);
+    return NULL;
+}
+
+// TODO: cleanup:
+#if 0
+typedef struct MisChunk {
+    char name[12];
+    LGDBVersion version;
+    uint32 size;
+    char *data;
+} MisChunk;
 
 typedef struct MisInfo {
     char filename[1024];
     size_t data_size;
     char *data;
 
-    uint32 toc_count;
-    LGDBTOCEntry *toc;
+    uint32 chunk_count;
+    MisChunk chunks[MAX_CHUNKS];
 } MisInfo;
 
 #define MAX_CELLS 32678UL           // Imposed by Dromed
@@ -186,16 +343,19 @@ typedef struct WorldRep {
     WorldRepCell cells[MAX_CELLS];
 } WorldRep;
 
+void dump(char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+}
+
 int mis_get_chunk(MisInfo *mis, char *tag, char **pdata, uint32 *psize, LGDBVersion *pversion) {
-    for (uint32 i=0; i<mis->toc_count; ++i) {
-        LGDBTOCEntry *toc = &mis->toc[i];
-        if (strncmp(toc->name, tag, 12)==0) {
-            uint32 offset = toc->offset;
-            LGDBChunkHeader *chunk = (LGDBChunkHeader *)(mis->data+offset);
-            assert(strncmp(chunk->name, tag, 12)==0);
-            offset += sizeof(LGDBChunkHeader);
-            *pdata = (mis->data+offset);
-            *psize = toc->data_size;
+    for (uint32 i=0; i<mis->chunk_count; ++i) {
+        MisChunk *chunk = &(mis->chunks[i]);
+        if (strncmp(chunk->name, tag, 12)==0) {
+            *pdata = chunk->data;
+            *psize = chunk->size;
             *pversion = chunk->version;
             return 1;
         }
@@ -208,8 +368,8 @@ int mis_get_chunk(MisInfo *mis, char *tag, char **pdata, uint32 *psize, LGDBVers
 
 MisInfo *load_mis(char *filename) {
     MisInfo *mis = (MisInfo *)malloc(sizeof(MisInfo));
-    char *end = strncpy(mis->filename, filename, sizeof(mis->filename)-1);
-    *end = 0;
+    strncpy(mis->filename, filename, sizeof(mis->filename)-1);
+    mis->filename[sizeof(mis->filename)-1] = 0;
 
     // Load the whole file into memory:
     FILE *file = fopen(filename, "rb");
@@ -224,22 +384,83 @@ MisInfo *load_mis(char *filename) {
 
     // Read the TOC:
     LGDBFileHeader *header = (LGDBFileHeader *)(mis->data);
-    char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
     assert(memcmp(header->deadbeef, DEADBEEF, sizeof(DEADBEEF))==0);
     assert(header->version.major==0);
     assert(header->version.minor==1);
-    mis->toc_count = *(uint32 *)(mis->data+header->table_offset);
-    mis->toc = (LGDBTOCEntry *)(mis->data+header->table_offset+sizeof(uint32));
-    #if 0
+
+    mis->chunk_count = *(uint32 *)(mis->data+header->table_offset);
+    LGDBTOCEntry *toc = (LGDBTOCEntry *)(mis->data+header->table_offset+sizeof(uint32));
+    for (uint32 i=0; i<mis->chunk_count; ++i) {
+        LGDBTOCEntry *entry = &toc[i];
+        MisChunk *chunk = &(mis->chunks[i]);
+        memcpy(chunk, entry->name, sizeof(chunk->name));
+        chunk->size = entry->data_size;
+        LGDBChunkHeader *chunk_header = (LGDBChunkHeader *)(mis->data+entry->offset);
+        chunk->version = chunk_header->version;
+        assert(memcmp(entry->name, chunk_header->name, sizeof(entry->name))==0);
+        uint32 offset = entry->offset+sizeof(LGDBChunkHeader);
+        chunk->data = (mis->data+offset);
+    }
+
+    #if 1
     dump("INDEX\tCHUNK\t\tOFFSET\t\tSIZE\n");
-    for (uint32 i=0; i<mis->toc_count; ++i) {
-        LGDBTOCEntry *toc = &mis->toc[i];
-        dump("%d\t%-12s\t0x%08lx\t0x%08lx\n", i, toc->name, toc->offset, toc->data_size);
+    for (uint32 i=0; i<mis->chunk_count; ++i) {
+        MisChunk *chunk = &(mis->chunks[i]);
+        uint32 offset = (uint32)(chunk->data-mis->data);
+        dump("%d\t%-12s\t0x%08lx\t0x%08lx\n", i, chunk->name, offset, chunk->size);
     }
     #endif
 
     return mis;
 }
+
+#if 0
+int write_mis(MisInfo *mis, char *filename) {
+    char temp_filename[1024];
+    strcpy(temp_filename, filename);
+    strcat(temp_filename, "~tmp");
+    FILE *file = fopen(temp_filename, "wb");
+    size_t n;
+
+    // TODO: version
+    LGDBFileHeader header = {0};
+    header.version.major = 0;
+    header.version.minor = 1;
+    memcpy(header.deadbeef, DEADBEEF, sizeof(DEADBEEF));
+
+    n = fwrite(&header, sizeof(header), 1, file); assert(n==1);
+    for (int i=0; i<mis->chunk_count; ++i) {
+        MisChunk *chunk = &(mis->chunks[i]);
+
+// typedef struct MisChunk {
+//     char name[12];
+//     LGDBVersion version;
+//     uint32 size;
+//     uint32 offset;
+//     char *data;
+// } MisChunk;
+
+// typedef struct MisInfo {
+//     char filename[1024];
+//     size_t data_size;
+//     char *data;
+
+//     uint32 chunk_count;
+//     MisChunk chunks[MAX_CHUNKS];
+// } MisInfo;
+
+    }
+
+    ...
+
+    uint32 toc_offset = (uint32)ftell(file);
+    write_toc();
+    fseek(file, 0, SEEK_SET);
+    n = fwrite(&toc_offset, sizeof(toc_offset), 1, file); assert(n==1);
+    fclose(file);
+    rename(temp_filename, filename);
+}
+#endif
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -340,7 +561,66 @@ void mis_read_wrext(MisInfo *mis) {
     }
 }
 
+#if 0
+MisInfo *copy_only_worldrep(MisInfo *in) {
+    MisInfo *out = (MisInfo *)malloc(sizeof(MisInfo));
+    memset(out, 0, sizeof(MisInfo);
+
+.................
+
+typedef struct LGDBFileHeader {
+    uint32 table_offset;
+    LGDBVersion version;
+    uint8 pad[256];
+    char deadbeef[4];
+} LGDBFileHeader;
+
+typedef struct LGDBTOCEntry {
+    char name[12];
+    uint32 offset;
+    uint32 data_size;
+} LGDBTOCEntry;
+
+typedef struct LGDBChunkHeader {
+    char name[12];
+    LGDBVersion version;
+    uint32 pad;
+} LGDBChunkHeader;
+
+    out->data_size = sizeof(LGDBFileHeader);
+
+    char *wrext;
+    uint32 wrext_size;
+    LGDBVersion wrext_version;
+    assert(mis_get_chunk(mis, "WREXT", &wrext, &wrext_size, &wrext_version));
+
+    ++out->chunk_count;
+    out->data_size += sizeof(LGDBChunkHeader)+wrext_size;
+
+    out->data_size += sizeof(uint32);
+    out->data_size += out->chunk_count*sizeof(LGDBTOCEntry);
+
+
+    typedef struct MisInfo {
+        char filename[1024];
+        size_t data_size;
+        char *data;
+
+        uint32 chunk_count;
+        MisChunk chunks[MAX_CHUNKS];
+} MisInfo;
+
+}
+#endif
+
+#endif
+
 int main(int argc, char *argv[]) {
-    MisInfo *mis = load_mis("miss20_low.mis");
-    mis_read_wrext(mis);
+    //MisInfo *mis = load_mis("miss20_low.mis");
+    //mis_read_wrext(mis);
+    //write_mis(mis, "deed.mis", keep_only_worldrep);
+
+    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1.mis");
+    dbfile = dbfile_free(dbfile);
+    printf("ok!\n");
 }
