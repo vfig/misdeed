@@ -25,27 +25,33 @@ typedef float float32;
 #undef assert
 
 #define assert(condition) \
+    do { \
     if (!(condition)) { \
         fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
         fflush(stderr); \
         abort(); \
-    }
+    } \
+    } while(0)
 
 #define assert_message(condition, message) \
+    do { \
     if (!(condition)) { \
         fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
         fprintf(stderr, "\t%s\n", message); \
         fflush(stderr); \
         abort(); \
-    }
+    } \
+    } while(0)
 
 #define assert_format(condition, fmt, ...) \
+    do { \
     if (!(condition)) { \
         fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
         fprintf(stderr, "\t" fmt "\n", __VA_ARGS__); \
         fflush(stderr); \
         abort(); \
-    }
+    } \
+    } while(0)
 
 void dump(char *fmt, ...) {
     va_list args;
@@ -119,8 +125,8 @@ typedef struct LGWRCellHeader {
     uint8 num_planes;
     uint8 medium;
     uint8 flags;
-    int32 portal_vertex_list;
-    uint16 num_vlist;
+    int32 portal_vertex_list;   // ??? index in vertices of first portal vertex?
+    uint16 num_vlist;           // (obsolete, should be 0) number of vertex-lighting entries
     uint8 num_anim_lights;
     uint8 motion_index;
     LGVector sphere_center;
@@ -363,6 +369,16 @@ DBFile *dbfile_free(DBFile *dbfile) {
 #define MAX_FACE_INDICES 32UL       // Imposed by Dromed
 #define MAX_INDICES (MAX_FACE_INDICES*MAX_FACES)
 
+// TODO: using unparsed wr cells is probably okay to get
+//       started with, but e.g. light ids will need to
+//       be updated later.
+//       unless... do LGWRPoly.plane_id and/or clut_id
+//       need renumbering anyway???
+typedef struct WorldRepCell_Unparsed {
+    uint32 size;
+    void *data;     // DO NOT FREE! unowned pointer into DBTagBlock.data
+} WorldRepCell_Unparsed;
+
 typedef struct WorldRepCell {
     LGWRCellHeader *header;
     LGVector *vertices;
@@ -380,13 +396,17 @@ typedef struct WorldRepCell {
     uint16 *light_indices;
 } WorldRepCell;
 
+typedef struct WorldRepLightmapFormat {
+    int lightmap_bpp;
+    int lightmap_2x_modulation;
+    float lightmap_scale;
+} WorldRepLightmapFormat;
+
 typedef struct WorldRep {
+    WorldRepLightmapFormat lightmap_format;
     uint32 cell_count;
-    WorldRepCell cells[MAX_CELLS];
+    WorldRepCell_Unparsed cells[MAX_CELLS];
 } WorldRep;
-
-
-#if 0
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -394,6 +414,34 @@ float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
     if (value==0) value = 1;
     int32 exponent = (int32)log2f((float)abs(value));
     return powf(2.0f, (float)(sign*exponent));
+}
+
+WorldRepLightmapFormat _wrext_get_lightmap_format(LGDBVersion wrext_version, LGWREXTHeader *header) {
+    // WR lightmap data is 8bpp
+    // WRRGB is 16bpp (xB5G5R5)
+    // WREXT can be 8, 16, or 32bpp.
+    WorldRepLightmapFormat format;
+    format.lightmap_bpp = 0;
+    format.lightmap_2x_modulation = 0;
+    format.lightmap_scale = 1.0;
+    switch (wrext_version.minor) {
+    case 23: format.lightmap_bpp = 6; break;
+    case 24: format.lightmap_bpp = 16; break;
+    case 30:
+        format.lightmap_scale = _wrext_lightmap_scale_factor(header->lightmap_scale);
+        switch (header->lightmap_format) {
+        case 0: format.lightmap_bpp = 16; break;
+        case 1: format.lightmap_bpp = 32; break;
+        case 2:
+            format.lightmap_bpp = 32;
+            format.lightmap_2x_modulation = 1;
+            break;
+        default: assert_message(0, "Unrecognized lightmap_format");
+        }
+        break;
+    default: assert_message(0, "Unsupported WREXT version");
+    }
+    return format;
 }
 
 uint32 bit_count(uint32 v) {
@@ -404,6 +452,8 @@ uint32 bit_count(uint32 v) {
     }
     return c;
 }
+
+#if 0
 
 char *wrext_read_cell(char *p, WorldRepCell *pcell, int lightmap_bpp) {
     pcell->header = (LGWRCellHeader *)p; p += sizeof(LGWRCellHeader);
@@ -489,11 +539,90 @@ void mis_read_wrext(MisInfo *mis) {
 
 #endif
 
+void *wrext_load_cell_unparsed(WorldRepCell_Unparsed *pcell, void *pdata, int lightmap_bpp) {
+    // Read a cell from *pdata, setting pcell->size and pcell->data.
+    // Return the next read offset, e.g. (p+pcell->size).
+    char *p = (char *)pdata;
+    pcell->data = p;
+    pcell->size = 0;
+
+    LGWRCellHeader header;
+    memcpy(&header, p, sizeof(header)); p += sizeof(header);
+
+    // Unfortunately _some_ parsing is necessary simply to read a cell:
+
+    p += header.num_vertices*sizeof(LGVector);
+    p += header.num_polys*sizeof(LGWRPoly);
+    p += header.num_render_polys*sizeof(LGWREXTRenderPoly); // TODO: if version < 30, use LGWRRenderPoly
+    uint32 index_count;
+    memcpy(&index_count, p, sizeof(index_count)); p += sizeof(index_count);
+    p += index_count*sizeof(uint8);
+    p += header.num_planes*sizeof(LGWRPlane);
+    p += header.num_anim_lights*sizeof(uint16);
+
+    uint32 lightmapinfo_count = header.num_render_polys;
+    LGWRLightMapInfo *lightmapinfo_array = NULL;
+    arrsetlen(lightmapinfo_array, lightmapinfo_count);
+    memcpy(lightmapinfo_array, p, lightmapinfo_count*sizeof(LGWRLightMapInfo));
+    p += lightmapinfo_count*sizeof(LGWRLightMapInfo);
+    for (uint32 i=0; i<lightmapinfo_count; ++i) {
+        LGWRLightMapInfo *info = &lightmapinfo_array[i];
+        uint32 lightmap_size = info->padded_width*info->height*(lightmap_bpp/8);
+        uint32 light_count = 1+bit_count(info->anim_light_bitmask); // 1 base lightmap, plus 1 per animlight
+        p += light_count*lightmap_size;
+    }
+    arrfree(lightmapinfo_array);
+
+    uint32 num_light_indices;
+    memcpy(&num_light_indices, p, sizeof(num_light_indices)); p += sizeof(num_light_indices);
+    p += num_light_indices*sizeof(uint16);
+
+    pcell->size = (uint32)(p-(char *)pcell->data);
+    return p;
+}
+
+WorldRep *wrext_load_from_tagblock(DBTagBlock *wrext) {
+    assert(tag_name_eq(wrext->key, tag_name_from_str("WREXT")));
+    assert(wrext->version.major==0 && wrext->version.minor==30);
+
+    WorldRep *worldrep = calloc(1, sizeof(WorldRep));
+    // TODO - maybe support olddark WR tagblocks?
+    char *p = wrext->data;
+
+    LGWREXTHeader header;
+    memcpy(&header, p, sizeof(header)); p += sizeof(header);
+    worldrep->cell_count = header.cell_count;
+    worldrep->lightmap_format = _wrext_get_lightmap_format(wrext->version, &header);
+
+    dump("WREXT chunk:\n");
+    dump("  version: %d.%d\n", wrext->version.major, wrext->version.minor);
+    dump("  unknown0: 0x%08x\n", header.unknown0);
+    dump("  unknown1: 0x%08x\n", header.unknown1);
+    dump("  unknown2: 0x%08x\n", header.unknown2);
+    dump("  lightmap_format: %ld\n", header.lightmap_format);
+    dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
+    dump("  data_size: %lu\n", header.data_size);
+    dump("  cell_count: %lu\n", header.cell_count);
+
+    int lightmap_bpp = worldrep->lightmap_format.lightmap_bpp;
+    for (uint32 cell_index=0; cell_index<worldrep->cell_count; ++cell_index) {
+        WorldRepCell_Unparsed *cell = &worldrep->cells[cell_index];
+        p = wrext_load_cell_unparsed(cell, p, lightmap_bpp);
+    }
+
+    assert(p<=(wrext->data+wrext->size));
+    return worldrep;
+}
+
 int main(int argc, char *argv[]) {
     //mis_read_wrext(mis);
 
     DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1.mis");
-    dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
+    DBTagBlock *wrext_tagblock = dbfile_get_tag(dbfile, "WREXT");
+    WorldRep *worldrep = wrext_load_from_tagblock(wrext_tagblock);
+    dump("WREXT read ok.\n");
+    free(worldrep);
+    //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);
-    dump("Ok.");
+    dump("Ok.\n");
 }
