@@ -99,7 +99,7 @@ typedef struct LGDBChunkHeader {
 } LGDBChunkHeader;
 
 typedef struct LGWRHeader {
-    uint32 data_size;
+    uint32 data_size;   // Added in WR version 18
     uint32 cell_count;
 } LGWRHeader;
 
@@ -113,7 +113,7 @@ typedef struct LGWREXTHeader {
                             // here; just ignore all but the highest bit,
                             // and use the sign bit to determine if it
                             // is a multiply or a divide.
-    uint32 data_size;
+    uint32 data_size;   // TODO: not sure exactly what size this is!! supposed to be the size to allocate... but is wrong??
     uint32 cell_count;
 } LGWREXTHeader;
 
@@ -181,6 +181,36 @@ typedef struct LGWRLightMapInfo {
     uint32 dynamic_light_ptr;   // Always zero on disk
     uint32 anim_light_bitmask;
 } LGWRLightMapInfo;
+
+typedef struct LGWRPortalPlane {
+   LGVector normal;
+   float32 plane_constant;
+} LGWRPortalPlane;
+
+typedef struct LGWRBSPNode {
+    union {
+        uint32 parent_index; // NOTE: must mask off high byte, `flags`.
+        struct {
+            uint8 pad1;
+            uint8 pad2;
+            uint8 pad3;
+            uint8 flags;     // NOTE: overlaps high byte of `parent_index`.
+        };
+    };
+    int32 plane_cell_id; // if -1, plane_id is an index into extra planes;
+                         // otherwise, it is an index into this cell's planes.
+    int32 plane_id;
+    union {
+        struct { // leaf nodes:
+            uint32 cell_id;
+            uint32 pad4;
+        };
+        struct { // non-leaf nodes:
+            uint32 inside_index;
+            uint32 outside_index;
+        };
+    };
+} LGWRBSPNode;
 
 #pragma pack(pop)
 
@@ -480,63 +510,6 @@ char *wrext_read_cell(char *p, WorldRepCell *pcell, int lightmap_bpp) {
     return p;
 }
 
-void mis_read_wrext(MisInfo *mis) {
-    char *wrext;
-    uint32 wrext_size;
-    LGDBVersion wrext_version;
-    assert(mis_get_chunk(mis, "WREXT", &wrext, &wrext_size, &wrext_version));
-    assert(wrext_version.major==0 && wrext_version.minor==30);
-    dump("WREXT found.\n");
-    char *p = wrext;
-
-    LGWREXTHeader *header = (LGWREXTHeader *)wrext; p += sizeof(LGWREXTHeader);
-
-    dump("WREXT chunk:\n");
-    dump("  version: %d.%d\n", wrext_version.major, wrext_version.minor);
-    dump("  unknown0: 0x%08x\n", header->unknown0);
-    dump("  unknown1: 0x%08x\n", header->unknown1);
-    dump("  unknown2: 0x%08x\n", header->unknown2);
-    dump("  lightmap_format: %ld\n", header->lightmap_format);
-    dump("  lightmap_scale: 0x%08x\n", header->lightmap_scale);
-    dump("  data_size: %lu\n", header->data_size);
-    dump("  cell_count: %lu\n", header->cell_count);
-
-    // WR lightmap data is 8bpp
-    // WRRGB is 16bpp (xB5G5R5)
-    // WREXT can be 8, 16, or 32bpp.
-    int lightmap_bpp;
-    int lightmap_2x_modulation = 0;
-    float lightmap_scale = 1.0;
-    switch (wrext_version.minor) {
-    case 23: lightmap_bpp = 6; break;
-    case 24: lightmap_bpp = 16; break;
-    case 30:
-        lightmap_scale = _wrext_lightmap_scale_factor(header->lightmap_scale);
-        switch (header->lightmap_format) {
-        case 0: lightmap_bpp = 16; break;
-        case 1: lightmap_bpp = 32; break;
-        case 2:
-            lightmap_bpp = 32;
-            lightmap_2x_modulation = 1;
-            break;
-        default: abort();
-        }
-        break;
-    default: abort();
-    }
-
-    dump("\tCELL\tVERTS\tPOLYS\tLIGHTMAP_SIZE\n");
-    for (uint32 cell_index=0; cell_index<header->cell_count; ++cell_index) {
-        WorldRepCell cell;
-        p = wrext_read_cell(p, &cell, lightmap_bpp);
-        dump("\t%lu\t%lu\t%lu\t%lu\n",
-            cell_index,
-            cell.header->num_vertices,
-            cell.header->num_polys,
-            cell.lightmaps_size);
-    }
-}
-
 #endif
 
 void *wrext_load_cell_unparsed(WorldRepCell_Unparsed *pcell, void *pdata, int lightmap_bpp) {
@@ -589,6 +562,12 @@ WorldRep *wrext_load_from_tagblock(DBTagBlock *wrext) {
     // TODO - maybe support olddark WR tagblocks?
     char *p = wrext->data;
 
+    if(1) {
+        FILE *f = fopen("wrext_raw", "wb");
+        fwrite(wrext->data, wrext->size, 1, f);
+        fclose(f);
+    }
+
     LGWREXTHeader header;
     memcpy(&header, p, sizeof(header)); p += sizeof(header);
     worldrep->cell_count = header.cell_count;
@@ -610,17 +589,48 @@ WorldRep *wrext_load_from_tagblock(DBTagBlock *wrext) {
         p = wrext_load_cell_unparsed(cell, p, lightmap_bpp);
     }
 
-    assert(p<=(wrext->data+wrext->size));
+    {
+        uint32 offset = (uint32)(p-(char *)wrext->data);
+        dump("offset after cells: 0x%08x. header.data_size: 0x%08x\n",
+            offset, header.data_size);
+    }
+
+    uint32 bsp_extraplane_count;
+    memcpy(&bsp_extraplane_count, p, sizeof(bsp_extraplane_count)); p += sizeof(bsp_extraplane_count);
+    p += bsp_extraplane_count*sizeof(LGWRPortalPlane);
+    dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
+    uint32 bsp_node_count;
+    memcpy(&bsp_node_count, p, sizeof(bsp_node_count)); p += sizeof(bsp_node_count);
+    p += bsp_node_count*sizeof(LGWRBSPNode);
+    dump("  bsp_node_count: %lu\n", bsp_node_count);
+
+    {
+        uint32 offset = (uint32)(p-(char *)wrext->data);
+        dump("offset after bsp: 0x%08x. wrext tag data size: 0x%08x\n",
+            offset, wrext->size);
+    }
+
+    if(1) {
+        uint32 offset = (uint32)(p-(char *)wrext->data);
+        uint32 size = wrext->size-offset;
+        FILE *f = fopen("wrext_suffix", "wb");
+        fwrite(p, size, 1, f);
+        fclose(f);
+    }
+
+    // NOTE: this assertion fails, because the WREXT has more info
+    //       after the bsp cells!
+    assert(p==(wrext->data+wrext->size));
     return worldrep;
 }
 
 int main(int argc, char *argv[]) {
     //mis_read_wrext(mis);
 
-    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1.mis");
+    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1_lit.mis");
     DBTagBlock *wrext_tagblock = dbfile_get_tag(dbfile, "WREXT");
+    dump("WREXT read ok, 0x%08x bytes of data.\n", wrext_tagblock->size);
     WorldRep *worldrep = wrext_load_from_tagblock(wrext_tagblock);
-    dump("WREXT read ok.\n");
     free(worldrep);
     //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);

@@ -49,9 +49,8 @@ rem Compile configuration
 echo /TC >> %clargs%
 echo /W4 >> %clargs%
 rem echo /WX >> %clargs% -------------- warnings as errors
-rem echo /wd4204 >> %clargs%
-rem echo /wd4221 >> %clargs%
-rem echo /wd4996 >> %clargs%
+rem C4201: nonstandard extension used: nameless struct/union
+echo /wd4201 >> %clargs%
 rem C4100: unreferenced formal parameter
 echo /wd4100 >> %clargs%
 echo /utf-8 >> %clargs%
