@@ -21,6 +21,7 @@ typedef uint16_t uint16;
 typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef float float32;
+typedef double float64;
 
 #undef assert
 
@@ -238,6 +239,35 @@ typedef struct LGWRBSPNode {
     };
 } LGWRBSPNode;
 
+typedef struct LGWRWhiteLight {
+    LGVector location;
+    LGVector direction;
+    float bright;
+    float inner;
+    float outer;
+    float radius;
+} LGWRWhiteLight;
+
+typedef struct LGWRRGBLight {
+    LGVector location;
+    LGVector direction;
+    LGVector bright; // TODO: ? bright/hue/sat ?
+    float inner;
+    float outer;
+    float radius;
+} LGWRRGBLight;
+
+typedef struct LGWRAnimlightToCell {
+    uint16 cell_index;
+    uint8 pos_in_cell_palette;
+    uint8 pad0;
+} LGWRAnimlightToCell;
+
+typedef struct LGWRCSGPlane {
+   float64 a,b,c;   // Normal to the plane
+   float64 d;       // Plane equation: ax + by + cz + d = 0
+} LGWRCSGPlane;
+
 #pragma pack(pop)
 
 /** Caution: misdeeds ahead! **/
@@ -421,7 +451,7 @@ typedef struct WorldRepCell {
     LGVector *vertex_array;
     LGWRPoly *poly_array;
     LGWRRenderPoly *renderpoly_array;          // only if !is_ext
-    LGWREXTRenderPoly *ext_renderpoly_array;   // only if is_ext
+    LGWREXTRenderPoly *renderpoly_ext_array;   // only if is_ext
     uint8 *index_array;
     LGWRPlane *plane_array;
     uint16 *animlight_array;
@@ -441,6 +471,24 @@ typedef struct WorldRep {
     WorldRepLightmapFormat lightmap_format;
     uint32 cell_count;
     WorldRepCell cells[MAX_CELLS];
+    LGWRPortalPlane *bsp_extraplane_array;
+    LGWRBSPNode *bsp_node_array;
+    // TODO: is this array always zeros? if not, what is it for?
+    uint8 *cell_unknown0_array;                 // only if is_wrext
+    LGWRWhiteLight *static_whitelight_array;    // only if is_wr
+    LGWRRGBLight *static_rgblight_array;        // only if is_wrrgb/is_wrext
+    LGWRWhiteLight *dynamic_whitelight_array;   // only if is_wr
+    LGWRRGBLight *dynamic_rgblight_array;       // only if is_wrrgb/is_wrext
+
+    LGWRAnimlightToCell *animlight_to_cell;
+    //int32 csg_cell_count;
+    // NOTE: csg_brush_index = (brface>>8)
+    //       face_index = (brface&0xff)
+    int32 *csg_brfaces_array; // TODO: does br=faces mean brush_polys? rename it?
+    //int32 csg_brush_count;
+    int32 *csg_brush_plane_count_array;
+    LGWRCSGPlane *csg_brush_planes_array;
+    int32 *csg_brush_refcounts_array;
 } WorldRep;
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
@@ -461,7 +509,7 @@ WorldRepLightmapFormat _wr_get_lightmap_format(LGDBVersion wr_version, LGWREXTHe
     format.lightmap_2x_modulation = 0;
     format.lightmap_scale = 1.0;
     switch (wr_version.minor) {
-    case 23: format.lightmap_bpp = 6; break;
+    case 23: format.lightmap_bpp = 8; break;
     case 24: format.lightmap_bpp = 16; break;
     case 30:
         assert(header!=NULL);
@@ -493,11 +541,8 @@ uint32 bit_count(uint32 v) {
 void wr_wipe_cell(WorldRepCell *cell) {
     if (cell->vertex_array) arrfree(cell->vertex_array);
     if (cell->poly_array) arrfree(cell->poly_array);
-    if (cell->is_ext) {
-        if (cell->ext_renderpoly_array) arrfree(cell->ext_renderpoly_array);
-    } else {
-        if (cell->renderpoly_array) arrfree(cell->renderpoly_array);
-    }
+    if (cell->renderpoly_ext_array) arrfree(cell->renderpoly_ext_array);
+    if (cell->renderpoly_array) arrfree(cell->renderpoly_array);
     if (cell->index_array) arrfree(cell->index_array);
     if (cell->plane_array) arrfree(cell->plane_array);
     if (cell->animlight_array) arrfree(cell->animlight_array);
@@ -517,7 +562,7 @@ void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     MEM_READ_ARRAY(cell->vertex_array, header.num_vertices, pread);
     MEM_READ_ARRAY(cell->poly_array, header.num_polys, pread);
     if (is_ext) {
-        MEM_READ_ARRAY(cell->ext_renderpoly_array, header.num_render_polys, pread);
+        MEM_READ_ARRAY(cell->renderpoly_ext_array, header.num_render_polys, pread);
     } else {
         MEM_READ_ARRAY(cell->renderpoly_array, header.num_render_polys, pread);
     }
@@ -605,11 +650,12 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
 
     uint32 bsp_extraplane_count;
     MEM_READ(bsp_extraplane_count, pread);
-    pread += bsp_extraplane_count*sizeof(LGWRPortalPlane);
+    MEM_READ_ARRAY(worldrep->bsp_extraplane_array, bsp_extraplane_count, pread);
     dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
+
     uint32 bsp_node_count;
     MEM_READ(bsp_node_count, pread);
-    pread += bsp_node_count*sizeof(LGWRBSPNode);
+    MEM_READ_ARRAY(worldrep->bsp_node_array, bsp_node_count, pread);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
     if(debug_dump_wr) {
@@ -623,6 +669,76 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
         fwrite(pread, size, 1, f);
         fclose(f);
     }
+
+    if (is_wrext) {
+        MEM_READ_ARRAY(worldrep->cell_unknown0_array, worldrep->cell_count, pread);
+        for (uint32 i=0, iend=(uint32)arrlen(worldrep->cell_unknown0_array); i<iend; ++i) {
+            if (worldrep->cell_unknown0_array[i]!=0) {
+                dump("*** cell_unknown0_array is not zeros ***\n");
+                break;
+            }
+        }
+    }
+
+    uint32 num_static_lights;
+    MEM_READ(num_static_lights, pread);
+    uint32 num_dynamic_lights;
+    MEM_READ(num_dynamic_lights, pread);
+
+    // WR,WRRGB always store 768 static light records, even when there are
+    // fewer static lights. Skip the remainder.
+    uint32 num_extra_static_light_records = is_wrext ? 0 : (768-num_static_lights);
+    if (is_wr) {
+        MEM_READ_ARRAY(worldrep->static_whitelight_array, num_static_lights, pread);
+        pread += num_extra_static_light_records*sizeof(LGWRWhiteLight);
+    } else {
+        MEM_READ_ARRAY(worldrep->static_rgblight_array, num_static_lights, pread);
+        pread += num_extra_static_light_records*sizeof(LGWRRGBLight);
+    }
+
+    // WR,WRRGB,WREXT always store 32 dynamic light records, even when there are
+    // fewer dynamic lights. Skip the remainder.
+    uint32 num_extra_dynamic_light_records = (32-num_dynamic_lights);
+    if (is_wr) {
+        MEM_READ_ARRAY(worldrep->dynamic_whitelight_array, num_dynamic_lights, pread);
+        pread += num_extra_dynamic_light_records*sizeof(LGWRWhiteLight);
+    } else {
+        MEM_READ_ARRAY(worldrep->dynamic_rgblight_array, num_dynamic_lights, pread);
+        pread += num_extra_dynamic_light_records*sizeof(LGWRRGBLight);
+    }
+
+    uint32 num_animlight_to_cell;
+    MEM_READ(num_animlight_to_cell, pread);
+    MEM_READ_ARRAY(worldrep->animlight_to_cell, num_animlight_to_cell, pread);
+
+    uint32 csg_cell_count;
+    MEM_READ(csg_cell_count, pread);
+    assert(csg_cell_count==worldrep->cell_count);
+    dump("csg_cell_count: %lu\n", csg_cell_count);
+    uint32 csg_brfaces_count = 0;
+    for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
+        uint32 renderpoly_count;
+        if (is_wrext) {
+            renderpoly_count = (uint32)arrlen(worldrep->cells[i].renderpoly_ext_array);
+        } else {
+            renderpoly_count = (uint32)arrlen(worldrep->cells[i].renderpoly_array);
+        }
+        csg_brfaces_count += renderpoly_count;
+    }
+    dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
+    assert(csg_brfaces_count!=0);
+    MEM_READ_ARRAY(worldrep->csg_brfaces_array, csg_brfaces_count, pread);
+    uint32 csg_brush_count;
+    MEM_READ(csg_brush_count, pread);
+    dump("csg_brush_count: %lu\n", csg_brush_count);
+    MEM_READ_ARRAY(worldrep->csg_brush_plane_count_array, csg_brush_count, pread);
+    uint32 csg_brush_plane_total_count = 0;
+    for (uint32 i=0, iend=(uint32)arrlen(worldrep->csg_brush_plane_count_array); i<iend; ++i) {
+        csg_brush_plane_total_count += worldrep->csg_brush_plane_count_array[i];
+    }
+    dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
+    MEM_READ_ARRAY(worldrep->csg_brush_planes_array, csg_brush_plane_total_count, pread);
+    MEM_READ_ARRAY(worldrep-> csg_brush_refcounts_array, csg_brush_count, pread);
 
     // NOTE: this assertion fails, because the WR has more info
     //       after the bsp cells!
