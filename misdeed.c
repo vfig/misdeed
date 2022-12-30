@@ -60,6 +60,26 @@ void dump(char *fmt, ...) {
     va_end(args);
 }
 
+#define MEM_ZERO(buf, size) memset(buf, 0, size)
+
+#define MEM_READ_SIZE(buf, size, p) \
+    do { \
+    memcpy(buf, p, size); p = (void *)((char *)p + size); \
+    } while(0)
+#define MEM_READ(var, p) MEM_READ_SIZE(&var, sizeof(var), p)
+#define MEM_READ_ARRAY(array, count, p) \
+    do { \
+    arrsetlen(array, count); \
+    memcpy(array, p, count*sizeof(array[0])); p = (void *)((char *)p + count*sizeof(array[0])); \
+    } while(0)
+
+#define FILE_READ_SIZE(buf, size, f) \
+    do { \
+    size_t n = fread(buf, size, 1, f); \
+    assert(n==1); \
+    } while(0)
+#define FILE_READ(var, f) FILE_READ_SIZE(&var, sizeof(var), f)
+
 /** .MIS data types **/
 
 #pragma pack(push, 1)
@@ -99,6 +119,9 @@ typedef struct LGDBChunkHeader {
 } LGDBChunkHeader;
 
 typedef struct LGWRHeader {
+    // TODO: will need to understand why data_size != sizeof(cell_data)
+    //       before we can merge cells, because data_size is used to
+    //       allocate space for cells, as i understand.
     uint32 data_size;   // Added in WR version 18
     uint32 cell_count;
 } LGWRHeader;
@@ -113,7 +136,10 @@ typedef struct LGWREXTHeader {
                             // here; just ignore all but the highest bit,
                             // and use the sign bit to determine if it
                             // is a multiply or a divide.
-    uint32 data_size;   // TODO: not sure exactly what size this is!! supposed to be the size to allocate... but is wrong??
+    // TODO: will need to understand why data_size != sizeof(cell_data)
+    //       before we can merge cells, because data_size is used to
+    //       allocate space for cells, as i understand.
+    uint32 data_size;
     uint32 cell_count;
 } LGWREXTHeader;
 
@@ -268,17 +294,10 @@ static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
 DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
     filename_copy_str(&(dbfile->filename), filename);
-
     FILE *file = fopen(filename, "rb");
-    #define READ_SIZE(buf, size) \
-        do { \
-        size_t n = fread(buf, size, 1, file); \
-        assert(n==1); \
-        } while(0)
-    #define READ(var) READ_SIZE(&var, sizeof(var))
 
     LGDBFileHeader header;
-    READ(header);
+    FILE_READ(header, file);
     assert_message(
         memcmp(header.deadbeef, DEADBEEF, sizeof(DEADBEEF))==0,
         "Wrong file type (missing DEADBEEF)");
@@ -290,13 +309,13 @@ DBFile *dbfile_load(const char *filename) {
 
     fseek(file, header.table_offset, SEEK_SET);
     LGDBTOCHeader toc_header;
-    READ(toc_header);
+    FILE_READ(toc_header, file);
 
     for (int i=0, iend=(int)toc_header.entry_count; i<iend; ++i) {
         DBTagBlock tagblock;
 
         LGDBTOCEntry toc_entry;
-        READ(toc_entry);
+        FILE_READ(toc_entry, file);
         tagblock.key = tag_name_from_str(toc_entry.name);
         tagblock.size = toc_entry.data_size;
         tagblock.data = NULL;
@@ -304,22 +323,19 @@ DBFile *dbfile_load(const char *filename) {
         LGDBChunkHeader chunk_header;
         uint32 position = (uint32)ftell(file);
         fseek(file, toc_entry.offset, SEEK_SET);
-        READ(chunk_header);
+        FILE_READ(chunk_header, file);
         assert(tag_name_eq(tagblock.key, tag_name_from_str(chunk_header.name)));
         tagblock.version = chunk_header.version;
         if (tagblock.size>0) {
             tagblock.data = malloc(tagblock.size);
-            READ_SIZE(tagblock.data, tagblock.size);
+            FILE_READ_SIZE(tagblock.data, tagblock.size, file);
         }
         fseek(file, position, SEEK_SET);
 
         hmputs(dbfile->tagblock_hash, tagblock);
     }
 
-    #undef READ
-    #undef READ_SIZE
     fclose(file);
-
     return dbfile;
 }
 
@@ -399,31 +415,20 @@ DBFile *dbfile_free(DBFile *dbfile) {
 #define MAX_FACE_INDICES 32UL       // Imposed by Dromed
 #define MAX_INDICES (MAX_FACE_INDICES*MAX_FACES)
 
-// TODO: using unparsed wr cells is probably okay to get
-//       started with, but e.g. light ids will need to
-//       be updated later.
-//       unless... do LGWRPoly.plane_id and/or clut_id
-//       need renumbering anyway???
-typedef struct WorldRepCell_Unparsed {
-    uint32 size;
-    void *data;     // DO NOT FREE! unowned pointer into DBTagBlock.data
-} WorldRepCell_Unparsed;
-
 typedef struct WorldRepCell {
-    LGWRCellHeader *header;
-    LGVector *vertices;
-    LGWRPoly *polys;
-    // TODO: if version < 30, use LGWRRenderPoly
-    LGWREXTRenderPoly *render_polys;
-    uint32 index_count;
-    uint8 *index_list;
-    LGWRPlane *plane_list;
-    uint16 *anim_lights;
-    LGWRLightMapInfo *light_list;
-    char *lightmaps;
+    int is_ext;
+    LGWRCellHeader header;
+    LGVector *vertex_array;
+    LGWRPoly *poly_array;
+    LGWRRenderPoly *renderpoly_array;          // only if !is_ext
+    LGWREXTRenderPoly *ext_renderpoly_array;   // only if is_ext
+    uint8 *index_array;
+    LGWRPlane *plane_array;
+    uint16 *animlight_array;
+    LGWRLightMapInfo *lightmapinfo_array;
+    uint16 *light_index_array;
     uint32 lightmaps_size;
-    uint32 num_light_indices;
-    uint16 *light_indices;
+    void *lightmaps;
 } WorldRepCell;
 
 typedef struct WorldRepLightmapFormat {
@@ -435,7 +440,7 @@ typedef struct WorldRepLightmapFormat {
 typedef struct WorldRep {
     WorldRepLightmapFormat lightmap_format;
     uint32 cell_count;
-    WorldRepCell_Unparsed cells[MAX_CELLS];
+    WorldRepCell cells[MAX_CELLS];
 } WorldRep;
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
@@ -485,88 +490,59 @@ uint32 bit_count(uint32 v) {
     return c;
 }
 
-#if 0
-
-char *wrext_read_cell(char *p, WorldRepCell *pcell, int lightmap_bpp) {
-    pcell->header = (LGWRCellHeader *)p; p += sizeof(LGWRCellHeader);
-    pcell->vertices = (LGVector *)p; p += pcell->header->num_vertices*sizeof(LGVector);
-    pcell->polys = (LGWRPoly *)p; p += pcell->header->num_polys*sizeof(LGWRPoly);
-    // TODO: if version < 30, use LGWRRenderPoly
-    pcell->render_polys = (LGWREXTRenderPoly *)p; p += pcell->header->num_render_polys*sizeof(LGWREXTRenderPoly);
-    pcell->index_count = *(uint32 *)p; p += sizeof(uint32);
-    pcell->index_list = (uint8 *)p; p += pcell->index_count*sizeof(uint8);
-    pcell->plane_list = (LGWRPlane *)p; p += pcell->header->num_planes*sizeof(LGWRPlane);
-    pcell->anim_lights = (uint16 *)p; p += pcell->header->num_anim_lights*sizeof(uint16);
-    pcell->light_list = (LGWRLightMapInfo *)p; p += pcell->header->num_render_polys*sizeof(LGWRLightMapInfo);
-    uint32 total_lightmap_size = 0;
-    for (int light=0; light<pcell->header->num_render_polys; ++light) {
-        LGWRLightMapInfo *info = &pcell->light_list[light];
-        uint32 lightmap_size = info->padded_width*info->height*(lightmap_bpp/8);
-        uint32 light_count = 1+bit_count(info->anim_light_bitmask); // 1 base lightmap, plus 1 per animlight
-        total_lightmap_size += light_count*lightmap_size;
+void wr_wipe_cell(WorldRepCell *cell) {
+    if (cell->vertex_array) arrfree(cell->vertex_array);
+    if (cell->poly_array) arrfree(cell->poly_array);
+    if (cell->is_ext) {
+        if (cell->ext_renderpoly_array) arrfree(cell->ext_renderpoly_array);
+    } else {
+        if (cell->renderpoly_array) arrfree(cell->renderpoly_array);
     }
-    pcell->lightmaps = p; p += total_lightmap_size;
-    pcell->lightmaps_size = total_lightmap_size;
-    pcell->num_light_indices = *(uint32 *)p; p += sizeof(uint32);
-    pcell->light_indices = (uint16 *)p; p += pcell->num_light_indices*sizeof(uint16);
-    return p;
+    if (cell->index_array) arrfree(cell->index_array);
+    if (cell->plane_array) arrfree(cell->plane_array);
+    if (cell->animlight_array) arrfree(cell->animlight_array);
+    if (cell->lightmapinfo_array) arrfree(cell->lightmapinfo_array);
+    if (cell->light_index_array) arrfree(cell->light_index_array);
+    if (cell->lightmaps) free(cell->lightmaps);
+    MEM_ZERO(cell, sizeof(*cell));
 }
 
-#endif
-
-void *wr_load_cell_unparsed(WorldRepCell_Unparsed *pcell, void *pdata, int is_wrext, int lightmap_bpp) {
-    // Read a cell from *pdata, setting pcell->size and pcell->data.
-    // Return the next read offset, e.g. (p+pcell->size).
-    char *p = (char *)pdata;
-    pcell->data = p;
-    pcell->size = 0;
-
+void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
+    char *pread = (char *)pdata;
+    MEM_ZERO(cell, sizeof(*cell));
+    cell->is_ext = is_ext;
     LGWRCellHeader header;
-    memcpy(&header, p, sizeof(header)); p += sizeof(header);
-
-    // Unfortunately _some_ parsing is necessary simply to read a cell:
-
-    p += header.num_vertices*sizeof(LGVector);
-    p += header.num_polys*sizeof(LGWRPoly);
-    if (is_wrext) {
-        p += header.num_render_polys*sizeof(LGWREXTRenderPoly);
+    MEM_READ(header, pread);
+    cell->header = header;
+    MEM_READ_ARRAY(cell->vertex_array, header.num_vertices, pread);
+    MEM_READ_ARRAY(cell->poly_array, header.num_polys, pread);
+    if (is_ext) {
+        MEM_READ_ARRAY(cell->ext_renderpoly_array, header.num_render_polys, pread);
     } else {
-        p += header.num_render_polys*sizeof(LGWRRenderPoly);
+        MEM_READ_ARRAY(cell->renderpoly_array, header.num_render_polys, pread);
     }
     uint32 index_count;
-    memcpy(&index_count, p, sizeof(index_count)); p += sizeof(index_count);
-    p += index_count*sizeof(uint8);
-    p += header.num_planes*sizeof(LGWRPlane);
-    p += header.num_anim_lights*sizeof(uint16);
-
-    uint32 lightmapinfo_count = header.num_render_polys;
-    LGWRLightMapInfo *lightmapinfo_array = NULL;
-    arrsetlen(lightmapinfo_array, lightmapinfo_count);
-    memcpy(lightmapinfo_array, p, lightmapinfo_count*sizeof(LGWRLightMapInfo));
-    p += lightmapinfo_count*sizeof(LGWRLightMapInfo);
-    for (uint32 i=0; i<lightmapinfo_count; ++i) {
-        LGWRLightMapInfo *info = &lightmapinfo_array[i];
+    MEM_READ(index_count, pread);
+    MEM_READ_ARRAY(cell->index_array, index_count, pread);
+    MEM_READ_ARRAY(cell->plane_array, header.num_planes, pread);
+    MEM_READ_ARRAY(cell->animlight_array, header.num_anim_lights, pread);
+    MEM_READ_ARRAY(cell->lightmapinfo_array, header.num_render_polys, pread);
+    cell->lightmaps_size = 0;
+    for (uint32 i=0, iend=(uint32)arrlen(cell->lightmapinfo_array); i<iend; ++i) {
+        LGWRLightMapInfo *info = &cell->lightmapinfo_array[i];
         uint32 lightmap_size = info->padded_width*info->height*(lightmap_bpp/8);
         uint32 light_count = 1+bit_count(info->anim_light_bitmask); // 1 base lightmap, plus 1 per animlight
-        p += light_count*lightmap_size;
+        cell->lightmaps_size += light_count*lightmap_size;
     }
-    arrfree(lightmapinfo_array);
-
+    cell->lightmaps = malloc(cell->lightmaps_size);
+    MEM_READ_SIZE(cell->lightmaps, cell->lightmaps_size, pread);
     uint32 num_light_indices;
-    memcpy(&num_light_indices, p, sizeof(num_light_indices)); p += sizeof(num_light_indices);
-    p += num_light_indices*sizeof(uint16);
-
-    pcell->size = (uint32)(p-(char *)pcell->data);
-    return p;
+    MEM_READ(num_light_indices, pread);
+    MEM_READ_ARRAY(cell->light_index_array, num_light_indices, pread);
+    return pread;
 }
 
 WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
-    #define READ_SIZE(buf, size) \
-        do { \
-        memcpy(buf, pread, size); pread += size; \
-        } while(0)
-    #define READ(var) READ_SIZE(&var, sizeof(var))
-    
     int debug_dump_wr = 1;
     int is_wr = tag_name_eq(wr->key, tag_name_from_str("WR"));
     int is_wrrgb = tag_name_eq(wr->key, tag_name_from_str("WRRGB"));
@@ -595,7 +571,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
 
     if (is_wrext) {
         LGWREXTHeader header;
-        READ(header);
+        MEM_READ(header, pread);
         worldrep->cell_count = header.cell_count;
         worldrep->lightmap_format = _wr_get_lightmap_format(wr->version, &header);
 
@@ -604,22 +580,21 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
         dump("  unknown2: 0x%08x\n", header.unknown2);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
-        dump("  data_size: %lu\n", header.data_size);
+        dump("  data_size: 0x%lx\n", header.data_size);
         dump("  cell_count: %lu\n", header.cell_count);
     } else {
         LGWRHeader header;
-        READ(header);
+        MEM_READ(header, pread);
         worldrep->cell_count = header.cell_count;
         worldrep->lightmap_format = _wr_get_lightmap_format(wr->version, NULL);
 
-        dump("  data_size: %lu\n", header.data_size);
+        dump("  data_size: 0x%lx\n", header.data_size);
         dump("  cell_count: %lu\n", header.cell_count);
     }
 
     int lightmap_bpp = worldrep->lightmap_format.lightmap_bpp;
     for (uint32 cell_index=0; cell_index<worldrep->cell_count; ++cell_index) {
-        WorldRepCell_Unparsed *cell = &worldrep->cells[cell_index];
-        pread = wr_load_cell_unparsed(cell, pread, is_wrext, lightmap_bpp);
+        pread = wr_load_cell(&worldrep->cells[cell_index], is_wrext, lightmap_bpp, pread);
     }
 
     { // TEMP: to try to figure out why header.data_size is the size it is...
@@ -629,11 +604,11 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     }
 
     uint32 bsp_extraplane_count;
-    READ(bsp_extraplane_count);
+    MEM_READ(bsp_extraplane_count, pread);
     pread += bsp_extraplane_count*sizeof(LGWRPortalPlane);
     dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
     uint32 bsp_node_count;
-    READ(bsp_node_count);
+    MEM_READ(bsp_node_count, pread);
     pread += bsp_node_count*sizeof(LGWRBSPNode);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
@@ -654,15 +629,10 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     assert(pread==(wr->data+wr->size));
 
     return worldrep;
-
-    #undef READ
-    #undef READ_SIZE
 }
 
 int main(int argc, char *argv[]) {
-    //mis_read_wrext(mis);
-
-    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1v24.mis");
+    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1v30.mis");
     DBTagBlock *wr_tagblock;
     wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
     if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
