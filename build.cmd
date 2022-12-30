@@ -42,7 +42,7 @@ echo /D_CRT_SECURE_NO_WARNINGS=1 >> %clargs%
 echo /Zi >> %clargs%
 echo /Fd:%builddir%\misdeed.pdb >> %clargs%
 echo /MD >> %clargs%
-rem echo /fsanitize=address >> %clargs%
+echo /fsanitize=address >> %clargs%
 rem Output configuration
 echo /Fo:%builddir%\ >> %clargs%
 rem Compile configuration
