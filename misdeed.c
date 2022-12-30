@@ -268,6 +268,14 @@ typedef struct LGWRCSGPlane {
    float64 d;       // Plane equation: ax + by + cz + d = 0
 } LGWRCSGPlane;
 
+// TODO: is this different in EXT? check PinkDot's info
+typedef struct LGWRCSGSurfaceRef {
+   int32 cell;
+   uint8 surface;
+   uint8 brush_face;
+   int16 vertex;
+} LGWRCSGSurfaceRef;
+
 #pragma pack(pop)
 
 /** Caution: misdeeds ahead! **/
@@ -481,14 +489,14 @@ typedef struct WorldRep {
     LGWRRGBLight *dynamic_rgblight_array;       // only if is_wrrgb/is_wrext
 
     LGWRAnimlightToCell *animlight_to_cell;
-    //int32 csg_cell_count;
     // NOTE: csg_brush_index = (brface>>8)
     //       face_index = (brface&0xff)
-    int32 *csg_brfaces_array; // TODO: does br=faces mean brush_polys? rename it?
-    //int32 csg_brush_count;
-    int32 *csg_brush_plane_count_array;
-    LGWRCSGPlane *csg_brush_planes_array;
-    int32 *csg_brush_refcounts_array;
+    // TODO: does br=faces mean brush_polys? rename it?
+    int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
+    int32 *csg_brush_plane_count_array;             // number of planes, per brush
+    LGWRCSGPlane *csg_brush_planes_array;           // all planes
+    int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
+    LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 } WorldRep;
 
 float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
@@ -738,10 +746,13 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     }
     dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
     MEM_READ_ARRAY(worldrep->csg_brush_planes_array, csg_brush_plane_total_count, pread);
-    MEM_READ_ARRAY(worldrep-> csg_brush_refcounts_array, csg_brush_count, pread);
+    MEM_READ_ARRAY(worldrep->csg_brush_surfaceref_count_array, csg_brush_count, pread);
+    uint32 csg_brush_surfaceref_total_count = 0;
+    for (uint32 i=0, iend=(uint32)arrlen(worldrep->csg_brush_surfaceref_count_array); i<iend; ++i) {
+        csg_brush_surfaceref_total_count += worldrep->csg_brush_surfaceref_count_array[i];
+    }
+    MEM_READ_ARRAY(worldrep->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
 
-    // NOTE: this assertion fails, because the WR has more info
-    //       after the bsp cells!
     assert(pread==(wr->data+wr->size));
 
     return worldrep;
