@@ -2,7 +2,6 @@ meta:
   id: mis_newdark
   file-extension: mis
   endian: le
-  bit-endian: le
 
 seq:
   - id: header
