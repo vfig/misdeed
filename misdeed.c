@@ -488,7 +488,7 @@ typedef struct WorldRep {
     LGWRWhiteLight *dynamic_whitelight_array;   // only if is_wr
     LGWRRGBLight *dynamic_rgblight_array;       // only if is_wrrgb/is_wrext
 
-    LGWRAnimlightToCell *animlight_to_cell;
+    LGWRAnimlightToCell *animlight_to_cell_array;
     // NOTE: csg_brush_index = (brface>>8)
     //       face_index = (brface&0xff)
     // TODO: does br=faces mean brush_polys? rename it?
@@ -593,6 +593,24 @@ void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     MEM_READ(num_light_indices, pread);
     MEM_READ_ARRAY(cell->light_index_array, num_light_indices, pread);
     return pread;
+}
+
+WorldRep *wr_free(WorldRep *worldrep) {
+    arrfree(worldrep->bsp_extraplane_array);
+    arrfree(worldrep->bsp_node_array);
+    arrfree(worldrep->cell_unknown0_array);
+    arrfree(worldrep->static_whitelight_array);
+    arrfree(worldrep->static_rgblight_array);
+    arrfree(worldrep->dynamic_whitelight_array);
+    arrfree(worldrep->dynamic_rgblight_array);
+    arrfree(worldrep->animlight_to_cell_array);
+    arrfree(worldrep->csg_brfaces_array);
+    arrfree(worldrep->csg_brush_plane_count_array);
+    arrfree(worldrep->csg_brush_planes_array);
+    arrfree(worldrep->csg_brush_surfaceref_count_array);
+    arrfree(worldrep->csg_brush_surfacerefs_array);
+    free(worldrep);
+    return NULL;
 }
 
 WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
@@ -717,7 +735,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
 
     uint32 num_animlight_to_cell;
     MEM_READ(num_animlight_to_cell, pread);
-    MEM_READ_ARRAY(worldrep->animlight_to_cell, num_animlight_to_cell, pread);
+    MEM_READ_ARRAY(worldrep->animlight_to_cell_array, num_animlight_to_cell, pread);
 
     uint32 csg_cell_count;
     MEM_READ(csg_cell_count, pread);
@@ -768,7 +786,7 @@ int main(int argc, char *argv[]) {
 
     dump("%s read ok, 0x%08x bytes of data.\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *worldrep = wr_load_from_tagblock(wr_tagblock);
-    free(worldrep);
+    worldrep = wr_free(worldrep);
     //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
