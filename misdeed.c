@@ -464,23 +464,36 @@ typedef struct WorldRepCell {
 } WorldRepCell;
 
 typedef struct WorldRepLightmapFormat {
-    int lightmap_bpp;
-    int lightmap_2x_modulation;
+    int lightmap_bpp;           // 8, 16, or 32
+    int lightmap_2x_modulation; // 0 or 1
     float lightmap_scale;
 } WorldRepLightmapFormat;
 
+typedef enum WorldRepFormat {
+    WorldRepFormatWR = 0,
+    WorldRepFormatWRRGB = 1,
+    WorldRepFormatWREXT = 2,
+} WorldRepFormat;
+
+static const LGDBVersion SupportedWRVersion[] = {
+    /* WorldRepFormatWR */    { 0, 23 },
+    /* WorldRepFormatWRRGB */ { 0, 24 },
+    /* WorldRepFormatWREXT */ { 0, 30 },
+};
+
 typedef struct WorldRep {
+    WorldRepFormat format;
     WorldRepLightmapFormat lightmap_format;
     uint32 cell_count;
     WorldRepCell *cell_array;
     LGWRPortalPlane *bsp_extraplane_array;
     LGWRBSPNode *bsp_node_array;
     // TODO: is this array always zeros? if not, what is it for?
-    uint8 *cell_unknown0_array;                 // only if is_wrext
-    LGWRWhiteLight *static_whitelight_array;    // only if is_wr
-    LGWRRGBLight *static_rgblight_array;        // only if is_wrrgb/is_wrext
-    LGWRWhiteLight *dynamic_whitelight_array;   // only if is_wr
-    LGWRRGBLight *dynamic_rgblight_array;       // only if is_wrrgb/is_wrext
+    uint8 *cell_unknown0_array;                 // only if WREXT
+    LGWRWhiteLight *static_whitelight_array;    // only if WR
+    LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
+    LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
+    LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
 
     LGWRAnimlightToCell *animlight_to_cell_array;
     // NOTE: csg_brush_index = (brface>>8)
@@ -613,18 +626,26 @@ void wr_free(WorldRep **pworldrep) {
 
 WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     int debug_dump_wr = 1;
-    int is_wr = tag_name_eq(wr->key, tag_name_from_str("WR"));
-    int is_wrrgb = tag_name_eq(wr->key, tag_name_from_str("WRRGB"));
-    int is_wrext = tag_name_eq(wr->key, tag_name_from_str("WREXT"));
-    uint32 required_minor_version = 0;
-    if (is_wr) required_minor_version = 23;
-    else if (is_wrrgb) required_minor_version = 24;
-    else required_minor_version = 30;
-    assert_format(wr->version.major==0 && wr->version.minor==required_minor_version,
-        "%s %d.%d not supported.", wr->key.s, wr->version.major, wr->version.minor);
 
     WorldRep *worldrep = calloc(1, sizeof(WorldRep));
     char *pread = wr->data;
+
+    if (tag_name_eq(wr->key, tag_name_from_str("WR"))) {
+        worldrep->format = WorldRepFormatWR;
+    } else if (tag_name_eq(wr->key, tag_name_from_str("WRRGB"))) {
+        worldrep->format = WorldRepFormatWRRGB;
+    } else if (tag_name_eq(wr->key, tag_name_from_str("WREXT"))) {
+        worldrep->format = WorldRepFormatWREXT;
+    } else {
+        assert_format(0, "%s not supported for worldrep.", wr->key.s);
+        /* die */
+    }
+    LGDBVersion supported_version = SupportedWRVersion[worldrep->format];
+    assert_format(wr->version.major==supported_version.major
+               && wr->version.minor==supported_version.minor,
+        "%s %d.%d not supported.", wr->key.s, wr->version.major, wr->version.minor);
+    int is_wr = (worldrep->format==WorldRepFormatWR);
+    int is_wrext = (worldrep->format==WorldRepFormatWREXT);
 
     if(debug_dump_wr) {
         char filename[FILENAME_SIZE] = "";
