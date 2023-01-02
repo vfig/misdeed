@@ -25,6 +25,20 @@ typedef double float64;
 
 #undef assert
 
+#define abort_message(message) \
+    do { \
+    fprintf(stderr, "\t%s\n", message); \
+    fflush(stderr); \
+    abort(); \
+    } while(0)
+
+#define abort_format(fmt, ...) \
+    do { \
+    fprintf(stderr, "\t" fmt "\n", __VA_ARGS__); \
+    fflush(stderr); \
+    abort(); \
+    } while(0)
+
 #define assert(condition) \
     do { \
     if (!(condition)) { \
@@ -38,9 +52,7 @@ typedef double float64;
     do { \
     if (!(condition)) { \
         fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
-        fprintf(stderr, "\t%s\n", message); \
-        fflush(stderr); \
-        abort(); \
+        abort_message(message); \
     } \
     } while(0)
 
@@ -48,9 +60,7 @@ typedef double float64;
     do { \
     if (!(condition)) { \
         fprintf(stderr, "Assertion failed, line %d: %s\n", __LINE__, #condition); \
-        fprintf(stderr, "\t" fmt "\n", __VA_ARGS__); \
-        fflush(stderr); \
-        abort(); \
+        abort_format("\t" fmt "\n", __VA_ARGS__); \
     } \
     } while(0)
 
@@ -60,6 +70,8 @@ void dump(char *fmt, ...) {
     vfprintf(stderr, fmt, args);
     va_end(args);
 }
+
+#define arrsize(arr) ((arr) ? ((uint32)(arrlenu(arr)*sizeof((arr)[0]))) : 0UL)
 
 #define MEM_ZERO(buf, size) memset(buf, 0, size)
 
@@ -129,8 +141,8 @@ typedef struct LGWRHeader {
 
 typedef struct LGWREXTHeader {
     uint32 unknown0;
-    uint32 unknown1; 
-    uint32 unknown2; 
+    uint32 unknown1;
+    uint32 unknown2;
     uint32 lightmap_format; // 0: 16 bit; 1: 32 bit; 2: 32 bit 2x
     int32 lightmap_scale;   // 0: 1x; 2: 2x; 4: 4x; -2: 0.5x; -4: 0.25x
                             // non power of two values may be stored in
@@ -506,7 +518,7 @@ typedef struct WorldRep {
     LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 } WorldRep;
 
-float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
+float32 _wr_decode_lightmap_scale(int32 lightmap_scale) {
     int32 value = lightmap_scale;
     int32 sign = (value>=0 ? 1 : -1);
     if (value==0) value = 1;
@@ -514,7 +526,11 @@ float32 _wrext_lightmap_scale_factor(int32 lightmap_scale) {
     return powf(2.0f, (float)(sign*exponent));
 }
 
-WorldRepLightmapFormat _wr_get_lightmap_format(LGDBVersion wr_version, LGWREXTHeader *header) {
+int32 _wr_encode_lightmap_scale(float32 scale_factor) {
+    return 2*(int32)log2f(scale_factor);
+}
+
+WorldRepLightmapFormat _wr_decode_lightmap_format(WorldRepFormat wr_format, LGWREXTHeader *header) {
     // `header` should be NULL for WR/WRRGB.
     // WR lightmap data is 8bpp
     // WRRGB is 16bpp (xB5G5R5)
@@ -523,12 +539,12 @@ WorldRepLightmapFormat _wr_get_lightmap_format(LGDBVersion wr_version, LGWREXTHe
     format.lightmap_bpp = 0;
     format.lightmap_2x_modulation = 0;
     format.lightmap_scale = 1.0;
-    switch (wr_version.minor) {
-    case 23: format.lightmap_bpp = 8; break;
-    case 24: format.lightmap_bpp = 16; break;
-    case 30:
+    switch (wr_format) {
+    case WorldRepFormatWR: format.lightmap_bpp = 8; break;
+    case WorldRepFormatWRRGB: format.lightmap_bpp = 16; break;
+    case WorldRepFormatWREXT:
         assert(header!=NULL);
-        format.lightmap_scale = _wrext_lightmap_scale_factor(header->lightmap_scale);
+        format.lightmap_scale = _wr_decode_lightmap_scale(header->lightmap_scale);
         switch (header->lightmap_format) {
         case 0: format.lightmap_bpp = 16; break;
         case 1: format.lightmap_bpp = 32; break;
@@ -536,12 +552,47 @@ WorldRepLightmapFormat _wr_get_lightmap_format(LGDBVersion wr_version, LGWREXTHe
             format.lightmap_bpp = 32;
             format.lightmap_2x_modulation = 1;
             break;
-        default: assert_message(0, "Unrecognized lightmap_format");
+        default: abort_message("Unrecognized lightmap_format");
         }
         break;
-    default: assert_message(0, "Unsupported WR/WRRGB/WREXT version");
+    default: abort_message("Unsupported WR/WRRGB/WREXT version");
     }
     return format;
+}
+
+uint32 _wr_encode_lightmap_format(WorldRepFormat wr_format, WorldRepLightmapFormat format) {
+    assert (wr_format==WorldRepFormatWREXT);
+    switch (format.lightmap_bpp) {
+    case 16: return 0;
+    case 32:
+        if (format.lightmap_2x_modulation) return 2;
+        else return 1;
+    default:
+        abort_message("Invalid WorldRepLightmapFormat.");
+        /* die */
+    }
+}
+
+uint32 _wr_calc_data_size(WorldRep *wr) {
+    uint32 size = 0;
+    for (int c=0, cend=wr->cell_count; c<cend; ++c) {
+        WorldRepCell *cell = &wr->cell_array[c];
+        size += sizeof(LGWRCellHeader);
+        size += arrsize(cell->vertex_array);
+        size += arrsize(cell->poly_array);
+        if (wr->format==WorldRepFormatWREXT) {
+            size += arrsize(cell->renderpoly_ext_array);
+        } else {
+            size += arrsize(cell->renderpoly_array);
+        }
+        size += arrsize(cell->index_array);
+        size += arrsize(cell->plane_array);
+        size += arrsize(cell->animlight_array);
+        size += arrsize(cell->lightmapinfo_array);
+        size += arrsize(cell->light_index_array);
+        size += cell->lightmaps_size;
+    }
+    return size;
 }
 
 uint32 bit_count(uint32 v) {
@@ -637,7 +688,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     } else if (tag_name_eq(tagblock->key, tag_name_from_str("WREXT"))) {
         wr->format = WorldRepFormatWREXT;
     } else {
-        assert_format(0, "%s not supported for WorldRep.", tagblock->key.s);
+        abort_format("%s not supported for WorldRep.", tagblock->key.s);
         /* die */
     }
     LGDBVersion supported_version = SupportedWRVersion[wr->format];
@@ -649,7 +700,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     if(debug_dump_wr) {
         char filename[FILENAME_SIZE] = "";
-        strcat(filename, "out.");
+        strcat(filename, "in.");
         strcat(filename, tagblock->key.s);
         FILE *f = fopen(filename, "wb");
         fwrite(tagblock->data, tagblock->size, 1, f);
@@ -659,8 +710,191 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     dump("%s chunk:\n", tagblock->key.s);
     dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
 
+    uint32 header_data_size;
     if (is_wrext) {
         LGWREXTHeader header;
+        MEM_READ(header, pread);
+        wr->cell_count = header.cell_count;
+        wr->lightmap_format = _wr_decode_lightmap_format(wr->format, &header);
+        header_data_size = header.data_size;
+
+        dump("  unknown0: 0x%08x\n", header.unknown0);
+        dump("  unknown1: 0x%08x\n", header.unknown1);
+        dump("  unknown2: 0x%08x\n", header.unknown2);
+        dump("  lightmap_format: %ld\n", header.lightmap_format);
+        dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
+        dump("  data_size: %lu\n", header.data_size);
+        dump("  cell_count: %lu\n", header.cell_count);
+    } else {
+        LGWRHeader header;
+        MEM_READ(header, pread);
+        wr->cell_count = header.cell_count;
+        wr->lightmap_format = _wr_decode_lightmap_format(wr->format, NULL);
+        header_data_size = header.data_size;
+
+        dump("  data_size: %lu\n", header.data_size);
+        dump("  cell_count: %lu\n", header.cell_count);
+    }
+
+    int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
+    arrsetlen(wr->cell_array, wr->cell_count);
+    for (uint32 cell_index=0; cell_index<wr->cell_count; ++cell_index) {
+        pread = wr_load_cell(&wr->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
+    }
+
+    { // TEMP: to try to figure out why header.data_size is the size it is...
+        uint32 offset = (uint32)(pread-(char *)tagblock->data);
+        dump("offset after cells: %lu. (compare header.data_size)\n",
+            offset);
+    }
+
+    uint32 bsp_extraplane_count;
+    MEM_READ(bsp_extraplane_count, pread);
+    MEM_READ_ARRAY(wr->bsp_extraplane_array, bsp_extraplane_count, pread);
+    dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
+
+    uint32 bsp_node_count;
+    MEM_READ(bsp_node_count, pread);
+    MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
+    dump("  bsp_node_count: %lu\n", bsp_node_count);
+
+    if(debug_dump_wr) {
+        uint32 offset = (uint32)(pread-(char *)tagblock->data);
+        uint32 size = tagblock->size-offset;
+        char filename[FILENAME_SIZE] = "";
+        strcat(filename, "in.");
+        strcat(filename, tagblock->key.s);
+        strcat(filename, "_suffix");
+        FILE *f = fopen(filename, "wb");
+        fwrite(pread, size, 1, f);
+        fclose(f);
+    }
+
+    if (is_wrext) {
+        MEM_READ_ARRAY(wr->cell_unknown0_array, wr->cell_count, pread);
+        for (uint32 i=0, iend=(uint32)arrlen(wr->cell_unknown0_array); i<iend; ++i) {
+            if (wr->cell_unknown0_array[i]!=0) {
+                dump("*** cell_unknown0_array is not zeros ***\n");
+                break;
+            }
+        }
+    }
+
+    uint32 num_static_lights;
+    MEM_READ(num_static_lights, pread);
+    uint32 num_dynamic_lights;
+    MEM_READ(num_dynamic_lights, pread);
+
+    // WR,WRRGB always store 768 static light records, even when there are
+    // fewer static lights. Skip the remainder.
+    uint32 num_extra_static_light_records = is_wrext ? 0 : (768-num_static_lights);
+    if (is_wr) {
+        MEM_READ_ARRAY(wr->static_whitelight_array, num_static_lights, pread);
+        pread += num_extra_static_light_records*sizeof(LGWRWhiteLight);
+    } else {
+        MEM_READ_ARRAY(wr->static_rgblight_array, num_static_lights, pread);
+        pread += num_extra_static_light_records*sizeof(LGWRRGBLight);
+    }
+
+    // WR,WRRGB,WREXT always store 32 dynamic light records, even when there are
+    // fewer dynamic lights. Skip the remainder.
+    uint32 num_extra_dynamic_light_records = (32-num_dynamic_lights);
+    if (is_wr) {
+        MEM_READ_ARRAY(wr->dynamic_whitelight_array, num_dynamic_lights, pread);
+        pread += num_extra_dynamic_light_records*sizeof(LGWRWhiteLight);
+    } else {
+        MEM_READ_ARRAY(wr->dynamic_rgblight_array, num_dynamic_lights, pread);
+        pread += num_extra_dynamic_light_records*sizeof(LGWRRGBLight);
+    }
+
+    uint32 num_animlight_to_cell;
+    MEM_READ(num_animlight_to_cell, pread);
+    MEM_READ_ARRAY(wr->animlight_to_cell_array, num_animlight_to_cell, pread);
+
+    uint32 csg_cell_count;
+    MEM_READ(csg_cell_count, pread);
+    assert(csg_cell_count==wr->cell_count);
+    dump("csg_cell_count: %lu\n", csg_cell_count);
+    uint32 csg_brfaces_count = 0;
+    for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
+        uint32 renderpoly_count;
+        if (is_wrext) {
+            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_ext_array);
+        } else {
+            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_array);
+        }
+        csg_brfaces_count += renderpoly_count;
+    }
+    dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
+    assert(csg_brfaces_count!=0);
+    MEM_READ_ARRAY(wr->csg_brfaces_array, csg_brfaces_count, pread);
+    uint32 csg_brush_count;
+    MEM_READ(csg_brush_count, pread);
+    dump("csg_brush_count: %lu\n", csg_brush_count);
+    MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
+    uint32 csg_brush_plane_total_count = 0;
+    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_plane_count_array); i<iend; ++i) {
+        csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
+    }
+    dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
+    MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
+    MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
+    uint32 csg_brush_surfaceref_total_count = 0;
+    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+        csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
+    }
+    MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
+
+    // Ensure we have read all the available data:
+    assert(pread==(tagblock->data+tagblock->size));
+    // Ensure we have a correct data_size calculation:
+    uint32 calc_data_size = _wr_calc_data_size(wr);
+    assert_format(calc_data_size==header_data_size,
+        "Size mismatch! header_size:%lu calculated data_size:%lu",
+        header_data_size, calc_data_size);
+
+    return wr;
+}
+
+#if 0
+void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
+    int debug_dump_wr = 1;
+
+    assert(tagblock->data==NULL);
+    // We write to a 256MB temporary buffer, and at the end we malloc
+    // tagblock->data and copy into that. Its not the most efficient
+    // way to go about things, but it's simpler, and that's more
+    // valuable here.
+    void *buffer = malloc(256UL*1048576UL);
+    char *pwrite = buffer;
+
+    switch (wr->format) {
+    case WorldRepFormatWR: tagblock->key = tag_name_from_str("WR"); break;
+    case WorldRepFormatWRRGB: tagblock->key = tag_name_from_str("WRRGB"); break;
+    case WorldRepFormatWREXT: tagblock->key = tag_name_from_str("WREXT"); break;
+    default:
+        abort_message("Invalid WorldRepFormat.");
+        /* die */
+    }
+    tagblock->version = SupportedWRVersion[wr->format];
+    dump("%s chunk:\n", tagblock->key.s);
+    dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
+
+    int is_wr = (wr->format==WorldRepFormatWR);
+    int is_wrext = (wr->format==WorldRepFormatWREXT);
+
+    if (is_wrext) {
+        LGWREXTHeader header;
+        // TODO: what should these be?
+        header.unknown0 = 0;
+        header.unknown1 = 0;
+        header.unknown2 = 0;
+        header.lightmap_format = _wr_encode_lightmap_format(wr->format, wr->lightmap_format);
+        header.lightmap_scale = _wr_encode_lightmap_scale(wr->lightmap_format.lightmap_scale);
+        header.data_size = _wr_calc_data_size.....
+        >>> you are here <<<
+        header.cell_count = (uint32)arrlen(wr->cell_array);
+
         MEM_READ(header, pread);
         wr->cell_count = header.cell_count;
         wr->lightmap_format = _wr_get_lightmap_format(tagblock->version, &header);
@@ -793,11 +1027,21 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     assert(pread==(tagblock->data+tagblock->size));
 
+    if(debug_dump_wr) {
+        char filename[FILENAME_SIZE] = "";
+        strcat(filename, "out.");
+        strcat(filename, tagblock->key.s);
+        FILE *f = fopen(filename, "wb");
+        fwrite(tagblock->data, tagblock->size, 1, f);
+        fclose(f);
+    }
+
     return wr;
 }
+#endif
 
 int main(int argc, char *argv[]) {
-    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1v30.mis");
+    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1v24.mis");
     DBTagBlock *wr_tagblock;
     wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
     if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
