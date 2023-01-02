@@ -447,12 +447,6 @@ DBFile *dbfile_free(DBFile *dbfile) {
 
 /** WorldRep stuff */
 
-#define MAX_CELLS 32678UL           // Imposed by Dromed
-#define MAX_VERTICES (256UL*1024UL) // Imposed by Dromed
-#define MAX_FACES (256UL*1024UL)    // Rough guess
-#define MAX_FACE_INDICES 32UL       // Imposed by Dromed
-#define MAX_INDICES (MAX_FACE_INDICES*MAX_FACES)
-
 typedef struct WorldRepCell {
     int is_ext;
     LGWRCellHeader header;
@@ -478,7 +472,7 @@ typedef struct WorldRepLightmapFormat {
 typedef struct WorldRep {
     WorldRepLightmapFormat lightmap_format;
     uint32 cell_count;
-    WorldRepCell cells[MAX_CELLS];
+    WorldRepCell *cell_array;
     LGWRPortalPlane *bsp_extraplane_array;
     LGWRBSPNode *bsp_node_array;
     // TODO: is this array always zeros? if not, what is it for?
@@ -546,18 +540,17 @@ uint32 bit_count(uint32 v) {
     return c;
 }
 
-void wr_wipe_cell(WorldRepCell *cell) {
-    if (cell->vertex_array) arrfree(cell->vertex_array);
-    if (cell->poly_array) arrfree(cell->poly_array);
-    if (cell->renderpoly_ext_array) arrfree(cell->renderpoly_ext_array);
-    if (cell->renderpoly_array) arrfree(cell->renderpoly_array);
-    if (cell->index_array) arrfree(cell->index_array);
-    if (cell->plane_array) arrfree(cell->plane_array);
-    if (cell->animlight_array) arrfree(cell->animlight_array);
-    if (cell->lightmapinfo_array) arrfree(cell->lightmapinfo_array);
-    if (cell->light_index_array) arrfree(cell->light_index_array);
-    if (cell->lightmaps) free(cell->lightmaps);
-    MEM_ZERO(cell, sizeof(*cell));
+void wr_free_cell(WorldRepCell *cell) {
+    arrfree(cell->vertex_array);
+    arrfree(cell->poly_array);
+    arrfree(cell->renderpoly_ext_array);
+    arrfree(cell->renderpoly_array);
+    arrfree(cell->index_array);
+    arrfree(cell->plane_array);
+    arrfree(cell->animlight_array);
+    arrfree(cell->lightmapinfo_array);
+    arrfree(cell->light_index_array);
+    free(cell->lightmaps); cell->lightmaps = NULL;
 }
 
 void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
@@ -595,7 +588,12 @@ void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     return pread;
 }
 
-WorldRep *wr_free(WorldRep *worldrep) {
+void wr_free(WorldRep **pworldrep) {
+    WorldRep *worldrep = *pworldrep;
+    for (uint32 i=0, iend=(uint32)arrlen(worldrep->cell_array); i<iend; ++i) {
+        wr_free_cell(&worldrep->cell_array[i]);
+    }
+    arrfree(worldrep->cell_array);
     arrfree(worldrep->bsp_extraplane_array);
     arrfree(worldrep->bsp_node_array);
     arrfree(worldrep->cell_unknown0_array);
@@ -610,7 +608,7 @@ WorldRep *wr_free(WorldRep *worldrep) {
     arrfree(worldrep->csg_brush_surfaceref_count_array);
     arrfree(worldrep->csg_brush_surfacerefs_array);
     free(worldrep);
-    return NULL;
+    *pworldrep = NULL;
 }
 
 WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
@@ -664,8 +662,9 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     }
 
     int lightmap_bpp = worldrep->lightmap_format.lightmap_bpp;
+    arrsetlen(worldrep->cell_array, worldrep->cell_count);
     for (uint32 cell_index=0; cell_index<worldrep->cell_count; ++cell_index) {
-        pread = wr_load_cell(&worldrep->cells[cell_index], is_wrext, lightmap_bpp, pread);
+        pread = wr_load_cell(&worldrep->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
     }
 
     { // TEMP: to try to figure out why header.data_size is the size it is...
@@ -745,9 +744,9 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *wr) {
     for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
         uint32 renderpoly_count;
         if (is_wrext) {
-            renderpoly_count = (uint32)arrlen(worldrep->cells[i].renderpoly_ext_array);
+            renderpoly_count = (uint32)arrlen(worldrep->cell_array[i].renderpoly_ext_array);
         } else {
-            renderpoly_count = (uint32)arrlen(worldrep->cells[i].renderpoly_array);
+            renderpoly_count = (uint32)arrlen(worldrep->cell_array[i].renderpoly_array);
         }
         csg_brfaces_count += renderpoly_count;
     }
@@ -786,7 +785,7 @@ int main(int argc, char *argv[]) {
 
     dump("%s read ok, 0x%08x bytes of data.\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *worldrep = wr_load_from_tagblock(wr_tagblock);
-    worldrep = wr_free(worldrep);
+    wr_free(&worldrep);
     //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
