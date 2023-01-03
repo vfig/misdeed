@@ -736,12 +736,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         pread = wr_load_cell(&wr->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
     }
 
-    { // TEMP: to try to figure out why header.alloc_size is the size it is...
-        uint32 offset = (uint32)(pread-(char *)tagblock->data);
-        dump("offset after cells: %lu. (compare header.alloc_size)\n",
-            offset);
-    }
-
     uint32 bsp_extraplane_count;
     MEM_READ(bsp_extraplane_count, pread);
     MEM_READ_ARRAY(wr->bsp_extraplane_array, bsp_extraplane_count, pread);
@@ -914,12 +908,6 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     arrsetlen(wr->cell_array, wr->cell_count);
     for (uint32 cell_index=0; cell_index<wr->cell_count; ++cell_index) {
         pread = wr_load_cell(&wr->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
-    }
-
-    { // TEMP: to try to figure out why header.alloc_size is the size it is...
-        uint32 offset = (uint32)(pread-(char *)tagblock->data);
-        dump("offset after cells: 0x%08x. (compare header.alloc_size)\n",
-            offset);
     }
 
     uint32 bsp_extraplane_count;
