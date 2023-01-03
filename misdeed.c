@@ -132,7 +132,7 @@ typedef struct LGDBChunkHeader {
 } LGDBChunkHeader;
 
 typedef struct LGWRHeader {
-    uint32 alloc_size;   // Added in WR version 18 (0x12)
+    uint32 cell_alloc_size;   // Added in WR version 18 (0x12)
     uint32 cell_count;
 } LGWRHeader;
 
@@ -146,7 +146,7 @@ typedef struct LGWREXTHeader {
                             // here; just ignore all but the highest bit,
                             // and use the sign bit to determine if it
                             // is a multiply or a divide.
-    uint32 alloc_size;
+    uint32 cell_alloc_size;
     uint32 cell_count;
 } LGWREXTHeader;
 
@@ -567,7 +567,7 @@ uint32 _wr_encode_lightmap_format(WorldRepFormat wr_format, WorldRepLightmapForm
     }
 }
 
-uint32 _wr_calc_alloc_size(WorldRep *wr) {
+uint32 _wr_calc_cell_alloc_size(WorldRep *wr) {
     uint32 size = 0;
     for (int c=0, cend=wr->cell_count; c<cend; ++c) {
         WorldRepCell *cell = &wr->cell_array[c];
@@ -704,29 +704,29 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     dump("%s chunk:\n", tagblock->key.s);
     dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
 
-    uint32 header_alloc_size;
+    uint32 header_cell_alloc_size;
     if (is_wrext) {
         LGWREXTHeader header;
         MEM_READ(header, pread);
         wr->cell_count = header.cell_count;
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, &header);
-        header_alloc_size = header.alloc_size;
+        header_cell_alloc_size = header.cell_alloc_size;
 
         dump("  unknown0: 0x%08x\n", header.unknown0);
         dump("  unknown1: 0x%08x\n", header.unknown1);
         dump("  unknown2: 0x%08x\n", header.unknown2);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
-        dump("  alloc_size: %lu\n", header.alloc_size);
+        dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     } else {
         LGWRHeader header;
         MEM_READ(header, pread);
         wr->cell_count = header.cell_count;
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, NULL);
-        header_alloc_size = header.alloc_size;
+        header_cell_alloc_size = header.cell_alloc_size;
 
-        dump("  alloc_size: %lu\n", header.alloc_size);
+        dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     }
 
@@ -835,11 +835,11 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     // Ensure we have read all the available data:
     assert(pread==(tagblock->data+tagblock->size));
-    // Ensure we have a correct alloc_size calculation:
-    uint32 calc_alloc_size = _wr_calc_alloc_size(wr);
-    assert_format(calc_alloc_size==header_alloc_size,
-        "Size mismatch! header_size:%lu calculated alloc_size:%lu",
-        header_alloc_size, calc_alloc_size);
+    // Ensure we have a correct cell_alloc_size calculation:
+    uint32 calc_cell_alloc_size = _wr_calc_cell_alloc_size(wr);
+    assert_format(calc_cell_alloc_size==header_cell_alloc_size,
+        "Size mismatch! header_size:%lu calculated cell_alloc_size:%lu",
+        header_cell_alloc_size, calc_cell_alloc_size);
 
     return wr;
 }
@@ -879,8 +879,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         header.unknown2 = 0;
         header.lightmap_format = _wr_encode_lightmap_format(wr->format, wr->lightmap_format);
         header.lightmap_scale = _wr_encode_lightmap_scale(wr->lightmap_format.lightmap_scale);
-        header.alloc_size = _wr_calc_alloc_size.....
-        >>> you are here <<<
+        header.cell_alloc_size = _wr_calc_cell_alloc_size(wr);
         header.cell_count = (uint32)arrlen(wr->cell_array);
 
         MEM_READ(header, pread);
@@ -892,7 +891,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         dump("  unknown2: 0x%08x\n", header.unknown2);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
-        dump("  alloc_size: 0x%lx\n", header.alloc_size);
+        dump("  cell_alloc_size: 0x%lx\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     } else {
         LGWRHeader header;
@@ -900,7 +899,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         wr->cell_count = header.cell_count;
         wr->lightmap_format = _wr_get_lightmap_format(tagblock->version, NULL);
 
-        dump("  alloc_size: 0x%lx\n", header.alloc_size);
+        dump("  cell_alloc_size: 0x%lx\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     }
 
