@@ -567,33 +567,25 @@ uint32 _wr_encode_lightmap_format(WorldRepFormat wr_format, WorldRepLightmapForm
     }
 }
 
-uint32 _temp_add_size(uint32 size, uint32 add, const char *desc) {
-    size += add;
-    dump("  +%d=%d\t(%s)\n", add, size, desc);
-    return size;
-}
-
 uint32 _wr_calc_alloc_size(WorldRep *wr) {
     uint32 size = 0;
-    dump("WR alloc size: %lu (begin)\n", size);
     for (int c=0, cend=wr->cell_count; c<cend; ++c) {
         WorldRepCell *cell = &wr->cell_array[c];
-        size = _temp_add_size(size, 84, "PortalCell struct");
-        size = _temp_add_size(size, arrsize(cell->vertex_array), "vertexes");
-        size = _temp_add_size(size, arrsize(cell->poly_array), "polys");
+        size += 84; // sizeof(PortalCell)
+        size += arrsize(cell->vertex_array);
+        size += arrsize(cell->poly_array);
         if (wr->format==WorldRepFormatWREXT) {
-            size = _temp_add_size(size, arrsize(cell->renderpoly_ext_array), "renderpolys");
+            size += arrsize(cell->renderpoly_ext_array);
         } else {
-            size = _temp_add_size(size, arrsize(cell->renderpoly_array), "renderpolys");
+            size += arrsize(cell->renderpoly_array);
         }
-        size = _temp_add_size(size, arrsize(cell->index_array), "indexes");
-        size = _temp_add_size(size, arrsize(cell->plane_array), "planes");
-        size = _temp_add_size(size, arrsize(cell->animlight_array), "animlights");
-        size = _temp_add_size(size, arrsize(cell->lightmapinfo_array), "lightmapinfo");
-        size = _temp_add_size(size, cell->lightmaps_size, "lightmaps (all)");
-        size = _temp_add_size(size, arrsize(cell->light_index_array), "light indexes");
+        size += arrsize(cell->index_array);
+        size += arrsize(cell->plane_array);
+        size += arrsize(cell->animlight_array);
+        size += arrsize(cell->lightmapinfo_array);
+        size += cell->lightmaps_size;
+        size += arrsize(cell->light_index_array);
     }
-    dump("  TOTAL: %lu\n", size);
     return size;
 }
 
