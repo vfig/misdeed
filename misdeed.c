@@ -12,7 +12,7 @@
 
 /** debug shit **/
 
-static int DEBUG_DUMP_WR = 0;
+static int DEBUG_DUMP_WR = 1;
 
 
 /** useful shit **/
@@ -156,7 +156,7 @@ typedef struct LGWRHeader {
 typedef struct LGWREXTHeader {
     uint32 unknown0;
     uint32 unknown1;
-    uint32 unknown2;
+    uint32 flags;
     uint32 lightmap_format; // 0: 16 bit; 1: 32 bit; 2: 32 bit 2x
     int32 lightmap_scale;   // 0: 1x; 2: 2x; 4: 4x; -2: 0.5x; -4: 0.25x
                             // non power of two values may be stored in
@@ -182,6 +182,15 @@ typedef struct LGWRCellHeader {
     LGVector sphere_center;
     float32 sphere_radius;
 } LGWRCellHeader;
+
+#define LGWRCellWeatherFog(zone) (((uint8)(zone))&0xf)
+#define LGWRCellWeatherAmbient(zone) ((((uint8)(zone))>>4)&0xf)
+#define LGWRCellWeatherZone(fog, ambient) (((((uint8)ambient)&0xf)<<4)|(((uint8)fog)&0xf))
+
+// NOTE: the lower 6 bits are for the environment map; it is unclear
+//       as of yet whether the upper 2 bits are used.
+#define LGWRCellEnvironmentMap(renderoptions) ((uint8)(renderoptions)&0x3f)
+#define LGWRCellRenderOptions(envmap) ((uint8)(envmap)&0x3f)
 
 typedef struct LGWRPoly {
     uint8 flags;
@@ -504,6 +513,12 @@ typedef enum WorldRepFormat {
     WorldRepFormatWREXT = 2,
 } WorldRepFormat;
 
+typedef enum WorldRepFlags {
+    WorldRepFlagsDefault = 0,
+    WorldRepFlagsLightmappedWater = 2,
+    WorldRepFlagsRenderOptions = 4,
+} WorldRepFlags;
+
 static const LGDBVersion SupportedWRVersion[] = {
     /* WorldRepFormatWR */    { 0, 23 },
     /* WorldRepFormatWRRGB */ { 0, 24 },
@@ -513,11 +528,12 @@ static const LGDBVersion SupportedWRVersion[] = {
 typedef struct WorldRep {
     WorldRepFormat format;
     WorldRepLightmapFormat lightmap_format;
+    WorldRepFlags flags;
     WorldRepCell *cell_array;
     LGWRPortalPlane *bsp_extraplane_array;
     LGWRBSPNode *bsp_node_array;
-    // TODO: is this array always zeros? if not, what is it for?
-    uint8 *cell_unknown0_array;                 // only if WREXT
+    uint8 *cell_weatherzones_array;             // only if WREXT
+    uint8 *cell_renderoptions_array;            // only if WREXT.flags & WorldRepFlagsRenderOptions
     LGWRWhiteLight *static_whitelight_array;    // only if WR
     LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
     LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
@@ -702,7 +718,8 @@ void wr_free(WorldRep **pwr) {
     arrfree(wr->cell_array);
     arrfree(wr->bsp_extraplane_array);
     arrfree(wr->bsp_node_array);
-    arrfree(wr->cell_unknown0_array);
+    arrfree(wr->cell_weatherzones_array);
+    arrfree(wr->cell_renderoptions_array);
     arrfree(wr->static_whitelight_array);
     arrfree(wr->static_rgblight_array);
     arrfree(wr->dynamic_whitelight_array);
@@ -757,10 +774,11 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         MEM_READ(header, pread);
         cell_count = header.cell_count;
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, &header);
+        wr->flags = header.flags;
         header_cell_alloc_size = header.cell_alloc_size;
         dump("  unknown0: 0x%08x\n", header.unknown0);
         dump("  unknown1: 0x%08x\n", header.unknown1);
-        dump("  unknown2: 0x%08x\n", header.unknown2);
+        dump("  flags: 0x%08x\n", header.flags);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
         dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
@@ -772,10 +790,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         //       back out.
         assert(header.unknown0==0x14);
         assert(header.unknown1==0x05);
-        // NOTE: header.unknown2 is flags including "lightmapped water";
-        //       for now we ignore it and will write back out 0, assuming
-        //       that whatever the flags are will be update when
-        //       re-lighting.
     } else {
         LGWRHeader header;
         MEM_READ(header, pread);
@@ -816,11 +830,23 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     }
 
     if (is_wrext) {
-        MEM_READ_ARRAY(wr->cell_unknown0_array, arrlenu(wr->cell_array), pread);
-        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_unknown0_array); i<iend; ++i) {
-            if (wr->cell_unknown0_array[i]!=0) {
-                dump("*** cell_unknown0_array is not zeros ***\n");
-                break;
+        MEM_READ_ARRAY(wr->cell_weatherzones_array, arrlenu(wr->cell_array), pread);
+        if (wr->flags & WorldRepFlagsRenderOptions) {
+            MEM_READ_ARRAY(wr->cell_renderoptions_array, arrlenu(wr->cell_array), pread);
+        }
+    }
+
+    if(DEBUG_DUMP_WR) {
+        dump("Zones:\n");
+        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_weatherzones_array); i<iend; ++i) {
+            uint8 zone = wr->cell_weatherzones_array[i];
+            dump("  %4lu: fog %2u, ambient %2u (raw 0x%02lx)\n", i, LGWRCellWeatherFog(zone), LGWRCellWeatherAmbient(zone), zone);
+        }
+        if (wr->flags & WorldRepFlagsRenderOptions) {
+            dump("Render Options:\n");
+            for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_renderoptions_array); i<iend; ++i) {
+                uint8 opts = wr->cell_renderoptions_array[i];
+                dump("  %4lu: envmap %2u (raw 0x%02x)\n", i, LGWRCellEnvironmentMap(opts), opts);
             }
         }
     }
@@ -901,7 +927,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     return wr;
 }
 
-void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
+uint32 wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     assert(tagblock->data==NULL);
     // We write to a 256MB temporary buffer, and at the end we malloc
     // tagblock->data and copy into that. Its not the most efficient
@@ -932,7 +958,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         //       on input to maintain consistency.
         header.unknown0 = 0x14;
         header.unknown1 = 0x05;
-        header.unknown2 = 0;
+        header.flags = wr->flags;
         header.lightmap_format = _wr_encode_lightmap_format(wr->format, wr->lightmap_format);
         header.lightmap_scale = _wr_encode_lightmap_scale(wr->lightmap_format.lightmap_scale);
         header.cell_alloc_size = _wr_calc_cell_alloc_size(wr);
@@ -941,7 +967,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
 
         dump("  unknown0: 0x%08x\n", header.unknown0);
         dump("  unknown1: 0x%08x\n", header.unknown1);
-        dump("  unknown2: 0x%08x\n", header.unknown2);
+        dump("  flags: 0x%08x\n", header.flags);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
         dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
@@ -961,70 +987,75 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         pwrite = wr_write_cell(&wr->cell_array[i], is_wrext, lightmap_bpp, pwrite);
     }
 
-#if 0
-
-    uint32 bsp_extraplane_count;
-    MEM_READ(bsp_extraplane_count, pread);
-    MEM_READ_ARRAY(wr->bsp_extraplane_array, bsp_extraplane_count, pread);
+    uint32 bsp_extraplane_count = (uint32)arrlenu(wr->bsp_extraplane_array);
+    MEM_WRITE(bsp_extraplane_count, pwrite);
+    MEM_WRITE_ARRAY(wr->bsp_extraplane_array, pwrite);
     dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
 
-    uint32 bsp_node_count;
-    MEM_READ(bsp_node_count, pread);
-    MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
+    uint32 bsp_node_count = (uint32)arrlenu(wr->bsp_node_array);
+    MEM_WRITE(bsp_node_count, pwrite);
+    MEM_WRITE_ARRAY(wr->bsp_node_array, pwrite);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
-    if(DEBUG_DUMP_WR) {
-        uint32 offset = (uint32)(pread-(char *)tagblock->data);
-        uint32 size = tagblock->size-offset;
-        char filename[FILENAME_SIZE] = "";
-        strcat(filename, "out.");
-        strcat(filename, tagblock->key.s);
-        strcat(filename, "_suffix");
-        FILE *f = fopen(filename, "wb");
-        fwrite(pread, size, 1, f);
-        fclose(f);
-    }
 
     if (is_wrext) {
-        MEM_READ_ARRAY(wr->cell_unknown0_array, wr->cell_count, pread);
-        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_unknown0_array); i<iend; ++i) {
-            if (wr->cell_unknown0_array[i]!=0) {
-                dump("*** cell_unknown0_array is not zeros ***\n");
-                break;
-            }
+        MEM_WRITE_ARRAY(wr->cell_weatherzones_array, pwrite);
+        if (wr->flags & WorldRepFlagsRenderOptions) {
+            MEM_WRITE_ARRAY(wr->cell_renderoptions_array, pwrite);
         }
     }
 
     uint32 num_static_lights;
-    MEM_READ(num_static_lights, pread);
     uint32 num_dynamic_lights;
-    MEM_READ(num_dynamic_lights, pread);
+    if (is_wr) {
+        num_static_lights = (uint32)arrlenu(wr->static_whitelight_array);
+        num_dynamic_lights = (uint32)arrlenu(wr->dynamic_whitelight_array);
+    } else {
+        num_static_lights = (uint32)arrlenu(wr->static_rgblight_array);
+        num_dynamic_lights = (uint32)arrlenu(wr->dynamic_rgblight_array);
+    }
+    MEM_WRITE(num_static_lights, pwrite);
+    MEM_WRITE(num_dynamic_lights, pwrite);
 
     // WR,WRRGB always store 768 static light records, even when there are
-    // fewer static lights. Skip the remainder.
+    // fewer static lights. Zero the remainder.
     uint32 num_extra_static_light_records = is_wrext ? 0 : (768-num_static_lights);
     if (is_wr) {
-        MEM_READ_ARRAY(wr->static_whitelight_array, num_static_lights, pread);
-        pread += num_extra_static_light_records*sizeof(LGWRWhiteLight);
+        MEM_WRITE_ARRAY(wr->static_whitelight_array, pwrite);
+        LGWRWhiteLight dummy = {0};
+        for (uint32 i=0, iend=num_extra_static_light_records; i<iend; ++i) {
+            MEM_WRITE(dummy, pwrite);
+        }
     } else {
-        MEM_READ_ARRAY(wr->static_rgblight_array, num_static_lights, pread);
-        pread += num_extra_static_light_records*sizeof(LGWRRGBLight);
+        MEM_WRITE_ARRAY(wr->static_rgblight_array, pwrite);
+        LGWRRGBLight dummy = {0};
+        for (uint32 i=0, iend=num_extra_static_light_records; i<iend; ++i) {
+            MEM_WRITE(dummy, pwrite);
+        }
     }
 
     // WR,WRRGB,WREXT always store 32 dynamic light records, even when there are
-    // fewer dynamic lights. Skip the remainder.
+    // fewer dynamic lights. Zero the remainder.
     uint32 num_extra_dynamic_light_records = (32-num_dynamic_lights);
     if (is_wr) {
-        MEM_READ_ARRAY(wr->dynamic_whitelight_array, num_dynamic_lights, pread);
-        pread += num_extra_dynamic_light_records*sizeof(LGWRWhiteLight);
+        MEM_WRITE_ARRAY(wr->dynamic_whitelight_array, pwrite);
+        LGWRWhiteLight dummy = {0};
+        for (uint32 i=0, iend=num_extra_dynamic_light_records; i<iend; ++i) {
+            MEM_WRITE(dummy, pwrite);
+        }
     } else {
-        MEM_READ_ARRAY(wr->dynamic_rgblight_array, num_dynamic_lights, pread);
-        pread += num_extra_dynamic_light_records*sizeof(LGWRRGBLight);
+        MEM_WRITE_ARRAY(wr->dynamic_rgblight_array, pwrite);
+        LGWRRGBLight dummy = {0};
+        for (uint32 i=0, iend=num_extra_dynamic_light_records; i<iend; ++i) {
+            MEM_WRITE(dummy, pwrite);
+        }
     }
 
-    uint32 num_animlight_to_cell;
-    MEM_READ(num_animlight_to_cell, pread);
-    MEM_READ_ARRAY(wr->animlight_to_cell_array, num_animlight_to_cell, pread);
+    uint32 num_animlight_to_cell = (uint32)arrlenu(wr->animlight_to_cell_array);
+    MEM_WRITE(num_animlight_to_cell, pwrite);
+    MEM_WRITE_ARRAY(wr->animlight_to_cell_array, pwrite);
+
+#if 0
 
     uint32 csg_cell_count;
     MEM_READ(csg_cell_count, pread);
@@ -1073,14 +1104,21 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
 
     return wr;
 #endif
+
+    // TEMP: this is all crap,just so our incremental write can be memcmp'd:
+    uint32 written_size = (uint32)(pwrite-(char *)buffer);
+    tagblock->size = written_size;
+    tagblock->data = buffer;
+    //free(buffer);
+    return written_size;
 }
 
 int main(int argc, char *argv[]) {
-    // if (argc<2) {
-    //     abort_message("give me a filename!");
-    // }
-    // char *filename = argv[1];
-    const char *filename = "e:/dev/thief/T2FM/test_misdeed/part1v24.mis";
+    if (argc<2) {
+        abort_message("give me a filename!");
+    }
+    char *filename = argv[1];
+    //const char *filename = "e:/dev/thief/T2FM/test_misdeed/part1v24.mis";
     // const char *filename = "e:/dev/thief/T2FM/test_misdeed/miss1.mis";
     dump("File: \"%s\"\n", filename);
     DBFile *dbfile = dbfile_load(filename);
@@ -1093,12 +1131,16 @@ int main(int argc, char *argv[]) {
     dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
 
+#if 1
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
-    wr_save_to_tagblock(&wr_tagblock2, wr);
+    uint32 written_size = wr_save_to_tagblock(&wr_tagblock2, wr);
+    assert(memcmp(wr_tagblock->data, wr_tagblock2.data, written_size)==0);
+    dump("TEMP: partial compare ok\n");
     assert(wr_tagblock->size==wr_tagblock2.size);
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
+#endif
 
     wr_free(&wr);
     //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
