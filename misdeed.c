@@ -10,6 +10,11 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+/** debug shit **/
+
+static int DEBUG_DUMP_WR = 0;
+
+
 /** useful shit **/
 
 typedef int8_t int8;
@@ -83,7 +88,19 @@ void dump(char *fmt, ...) {
 #define MEM_READ_ARRAY(array, count, p) \
     do { \
     arrsetlen(array, count); \
-    memcpy(array, p, count*sizeof(array[0])); p = (void *)((char *)p + count*sizeof(array[0])); \
+    size_t size = count*sizeof(array[0]); \
+    memcpy(array, p, size); p = (void *)((char *)p + size); \
+    } while(0)
+
+#define MEM_WRITE_SIZE(buf, size, p) \
+    do { \
+    memcpy(p, buf, size); p = (void *)((char *)p + size); \
+    } while(0)
+#define MEM_WRITE(var, p) MEM_WRITE_SIZE(&var, sizeof(var), p)
+#define MEM_WRITE_ARRAY(array, p) \
+    do { \
+    size_t size = arrlenu(array)*sizeof(array[0]); \
+    memcpy(p, array, size); p = (void *)((char *)p + size); \
     } while(0)
 
 #define FILE_READ_SIZE(buf, size, f) \
@@ -335,6 +352,12 @@ static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
     return hmgetp_null(dbfile->tagblock_hash, name);
 }
 
+static void dbtagblock_wipe(DBTagBlock *tagblock) {
+    tagblock->size = 0;
+    free(tagblock->data);
+    tagblock->data = 0;
+}
+
 DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
     filename_copy_str(&(dbfile->filename), filename);
@@ -423,9 +446,9 @@ void dbfile_save(DBFile *dbfile, const char *filename) {
 
     uint32 toc_offset = (uint32)ftell(file);
     LGDBTOCHeader toc_header = {0};
-    toc_header.entry_count = (uint32)arrlen(toc_array);
+    toc_header.entry_count = (uint32)arrlenu(toc_array);
     WRITE(toc_header);
-    for (int i=0, iend=(int)arrlen(toc_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(toc_array); i<iend; ++i) {
         WRITE(toc_array[i]);
     }
     arrfree(toc_array);
@@ -444,7 +467,7 @@ void dbfile_save(DBFile *dbfile, const char *filename) {
 DBFile *dbfile_free(DBFile *dbfile) {
     for (int i=0, iend=(int)hmlen(dbfile->tagblock_hash); i<iend; ++i) {
         DBTagBlock *tagblock = &dbfile->tagblock_hash[i];
-        free(tagblock->data);
+        dbtagblock_wipe(tagblock);
     }
     hmfree(dbfile->tagblock_hash);
     free(dbfile);
@@ -490,7 +513,6 @@ static const LGDBVersion SupportedWRVersion[] = {
 typedef struct WorldRep {
     WorldRepFormat format;
     WorldRepLightmapFormat lightmap_format;
-    uint32 cell_count;
     WorldRepCell *cell_array;
     LGWRPortalPlane *bsp_extraplane_array;
     LGWRBSPNode *bsp_node_array;
@@ -569,7 +591,7 @@ uint32 _wr_encode_lightmap_format(WorldRepFormat wr_format, WorldRepLightmapForm
 
 uint32 _wr_calc_cell_alloc_size(WorldRep *wr) {
     uint32 size = 0;
-    for (int c=0, cend=wr->cell_count; c<cend; ++c) {
+    for (uint32 c=0, cend=(uint32)arrlenu(wr->cell_array); c<cend; ++c) {
         WorldRepCell *cell = &wr->cell_array[c];
         size += 84; // sizeof(PortalCell)
         size += arrsize(cell->vertex_array);
@@ -611,7 +633,7 @@ void wr_free_cell(WorldRepCell *cell) {
     free(cell->lightmaps); cell->lightmaps = NULL;
 }
 
-void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
+void *wr_read_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
     char *pread = (char *)pdata;
     MEM_ZERO(cell, sizeof(*cell));
     cell->is_ext = is_ext;
@@ -632,7 +654,7 @@ void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     MEM_READ_ARRAY(cell->animlight_array, header.num_anim_lights, pread);
     MEM_READ_ARRAY(cell->lightmapinfo_array, header.num_render_polys, pread);
     cell->lightmaps_size = 0;
-    for (uint32 i=0, iend=(uint32)arrlen(cell->lightmapinfo_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(cell->lightmapinfo_array); i<iend; ++i) {
         LGWRLightMapInfo *info = &cell->lightmapinfo_array[i];
         uint32 lightmap_size = info->padded_width*info->height*(lightmap_bpp/8);
         uint32 light_count = 1+bit_count(info->anim_light_bitmask); // 1 base lightmap, plus 1 per animlight
@@ -646,9 +668,35 @@ void *wr_load_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     return pread;
 }
 
+void *wr_write_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
+    char *pwrite = (char *)pdata;
+    assert(cell->is_ext==is_ext);
+    LGWRCellHeader header = cell->header;
+    MEM_WRITE(header, pwrite);
+
+    MEM_WRITE_ARRAY(cell->vertex_array, pwrite);
+    MEM_WRITE_ARRAY(cell->poly_array, pwrite);
+    if (is_ext) {
+        MEM_WRITE_ARRAY(cell->renderpoly_ext_array, pwrite);
+    } else {
+        MEM_WRITE_ARRAY(cell->renderpoly_array, pwrite);
+    }
+    uint32 index_count = (uint32)arrlenu(cell->index_array);
+    MEM_WRITE(index_count, pwrite);
+    MEM_WRITE_ARRAY(cell->index_array, pwrite);
+    MEM_WRITE_ARRAY(cell->plane_array, pwrite);
+    MEM_WRITE_ARRAY(cell->animlight_array, pwrite);
+    MEM_WRITE_ARRAY(cell->lightmapinfo_array, pwrite);
+    MEM_WRITE_SIZE(cell->lightmaps, cell->lightmaps_size, pwrite);
+    uint32 num_light_indices = (uint32)arrlenu(cell->light_index_array);
+    MEM_WRITE(num_light_indices, pwrite);
+    MEM_WRITE_ARRAY(cell->light_index_array, pwrite);
+    return pwrite;
+}
+
 void wr_free(WorldRep **pwr) {
     WorldRep *wr = *pwr;
-    for (uint32 i=0, iend=(uint32)arrlen(wr->cell_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
         wr_free_cell(&wr->cell_array[i]);
     }
     arrfree(wr->cell_array);
@@ -670,8 +718,6 @@ void wr_free(WorldRep **pwr) {
 }
 
 WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
-    int debug_dump_wr = 1;
-
     WorldRep *wr = calloc(1, sizeof(WorldRep));
     char *pread = tagblock->data;
 
@@ -692,7 +738,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     int is_wr = (wr->format==WorldRepFormatWR);
     int is_wrext = (wr->format==WorldRepFormatWREXT);
 
-    if(debug_dump_wr) {
+    if(DEBUG_DUMP_WR) {
         char filename[FILENAME_SIZE] = "";
         strcat(filename, "in.");
         strcat(filename, tagblock->key.s);
@@ -705,13 +751,13 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
 
     uint32 header_cell_alloc_size;
+    uint32 cell_count;
     if (is_wrext) {
         LGWREXTHeader header;
         MEM_READ(header, pread);
-        wr->cell_count = header.cell_count;
+        cell_count = header.cell_count;
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, &header);
         header_cell_alloc_size = header.cell_alloc_size;
-
         dump("  unknown0: 0x%08x\n", header.unknown0);
         dump("  unknown1: 0x%08x\n", header.unknown1);
         dump("  unknown2: 0x%08x\n", header.unknown2);
@@ -719,10 +765,21 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
         dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
+
+        // NOTE: We don't know what these values mean yet, so just make
+        //       sure they are the same as we typically see -- because
+        //       we don't store them, but will write that same value
+        //       back out.
+        assert(header.unknown0==0x14);
+        assert(header.unknown1==0x05);
+        // NOTE: header.unknown2 is flags including "lightmapped water";
+        //       for now we ignore it and will write back out 0, assuming
+        //       that whatever the flags are will be update when
+        //       re-lighting.
     } else {
         LGWRHeader header;
         MEM_READ(header, pread);
-        wr->cell_count = header.cell_count;
+        cell_count = header.cell_count;
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, NULL);
         header_cell_alloc_size = header.cell_alloc_size;
 
@@ -731,9 +788,9 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     }
 
     int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
-    arrsetlen(wr->cell_array, wr->cell_count);
-    for (uint32 cell_index=0; cell_index<wr->cell_count; ++cell_index) {
-        pread = wr_load_cell(&wr->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
+    arrsetlen(wr->cell_array, cell_count);
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
+        pread = wr_read_cell(&wr->cell_array[i], is_wrext, lightmap_bpp, pread);
     }
 
     uint32 bsp_extraplane_count;
@@ -746,7 +803,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
-    if(debug_dump_wr) {
+    if(DEBUG_DUMP_WR) {
         uint32 offset = (uint32)(pread-(char *)tagblock->data);
         uint32 size = tagblock->size-offset;
         char filename[FILENAME_SIZE] = "";
@@ -759,8 +816,8 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     }
 
     if (is_wrext) {
-        MEM_READ_ARRAY(wr->cell_unknown0_array, wr->cell_count, pread);
-        for (uint32 i=0, iend=(uint32)arrlen(wr->cell_unknown0_array); i<iend; ++i) {
+        MEM_READ_ARRAY(wr->cell_unknown0_array, arrlenu(wr->cell_array), pread);
+        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_unknown0_array); i<iend; ++i) {
             if (wr->cell_unknown0_array[i]!=0) {
                 dump("*** cell_unknown0_array is not zeros ***\n");
                 break;
@@ -801,15 +858,15 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     uint32 csg_cell_count;
     MEM_READ(csg_cell_count, pread);
-    assert(csg_cell_count==wr->cell_count);
+    assert(csg_cell_count==arrlenu(wr->cell_array));
     dump("csg_cell_count: %lu\n", csg_cell_count);
     uint32 csg_brfaces_count = 0;
     for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
         uint32 renderpoly_count;
         if (is_wrext) {
-            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_ext_array);
+            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
         } else {
-            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_array);
+            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
         }
         csg_brfaces_count += renderpoly_count;
     }
@@ -821,14 +878,14 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     dump("csg_brush_count: %lu\n", csg_brush_count);
     MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
     uint32 csg_brush_plane_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_plane_count_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
         csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
     }
     dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
     MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
     MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
     uint32 csg_brush_surfaceref_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
         csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
     }
     MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
@@ -844,10 +901,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     return wr;
 }
 
-#if 0
 void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
-    int debug_dump_wr = 1;
-
     assert(tagblock->data==NULL);
     // We write to a 256MB temporary buffer, and at the end we malloc
     // tagblock->data and copy into that. Its not the most efficient
@@ -873,41 +927,41 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
 
     if (is_wrext) {
         LGWREXTHeader header;
-        // TODO: what should these be?
-        header.unknown0 = 0;
-        header.unknown1 = 0;
+        // NOTE: we don't know what these values mean, so we just write
+        //       out the typical values. Note that we assert on them
+        //       on input to maintain consistency.
+        header.unknown0 = 0x14;
+        header.unknown1 = 0x05;
         header.unknown2 = 0;
         header.lightmap_format = _wr_encode_lightmap_format(wr->format, wr->lightmap_format);
         header.lightmap_scale = _wr_encode_lightmap_scale(wr->lightmap_format.lightmap_scale);
         header.cell_alloc_size = _wr_calc_cell_alloc_size(wr);
-        header.cell_count = (uint32)arrlen(wr->cell_array);
-
-        MEM_READ(header, pread);
-        wr->cell_count = header.cell_count;
-        wr->lightmap_format = _wr_get_lightmap_format(tagblock->version, &header);
+        header.cell_count = (uint32)arrlenu(wr->cell_array);
+        MEM_WRITE(header, pwrite);
 
         dump("  unknown0: 0x%08x\n", header.unknown0);
         dump("  unknown1: 0x%08x\n", header.unknown1);
         dump("  unknown2: 0x%08x\n", header.unknown2);
         dump("  lightmap_format: %ld\n", header.lightmap_format);
         dump("  lightmap_scale: 0x%08x\n", header.lightmap_scale);
-        dump("  cell_alloc_size: 0x%lx\n", header.cell_alloc_size);
+        dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     } else {
         LGWRHeader header;
-        MEM_READ(header, pread);
-        wr->cell_count = header.cell_count;
-        wr->lightmap_format = _wr_get_lightmap_format(tagblock->version, NULL);
+        header.cell_alloc_size = _wr_calc_cell_alloc_size(wr);
+        header.cell_count = (uint32)arrlenu(wr->cell_array);
+        MEM_WRITE(header, pwrite);
 
-        dump("  cell_alloc_size: 0x%lx\n", header.cell_alloc_size);
+        dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
         dump("  cell_count: %lu\n", header.cell_count);
     }
 
     int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
-    arrsetlen(wr->cell_array, wr->cell_count);
-    for (uint32 cell_index=0; cell_index<wr->cell_count; ++cell_index) {
-        pread = wr_load_cell(&wr->cell_array[cell_index], is_wrext, lightmap_bpp, pread);
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
+        pwrite = wr_write_cell(&wr->cell_array[i], is_wrext, lightmap_bpp, pwrite);
     }
+
+#if 0
 
     uint32 bsp_extraplane_count;
     MEM_READ(bsp_extraplane_count, pread);
@@ -919,7 +973,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
-    if(debug_dump_wr) {
+    if(DEBUG_DUMP_WR) {
         uint32 offset = (uint32)(pread-(char *)tagblock->data);
         uint32 size = tagblock->size-offset;
         char filename[FILENAME_SIZE] = "";
@@ -933,7 +987,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
 
     if (is_wrext) {
         MEM_READ_ARRAY(wr->cell_unknown0_array, wr->cell_count, pread);
-        for (uint32 i=0, iend=(uint32)arrlen(wr->cell_unknown0_array); i<iend; ++i) {
+        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_unknown0_array); i<iend; ++i) {
             if (wr->cell_unknown0_array[i]!=0) {
                 dump("*** cell_unknown0_array is not zeros ***\n");
                 break;
@@ -980,9 +1034,9 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
         uint32 renderpoly_count;
         if (is_wrext) {
-            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_ext_array);
+            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
         } else {
-            renderpoly_count = (uint32)arrlen(wr->cell_array[i].renderpoly_array);
+            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
         }
         csg_brfaces_count += renderpoly_count;
     }
@@ -994,21 +1048,21 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     dump("csg_brush_count: %lu\n", csg_brush_count);
     MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
     uint32 csg_brush_plane_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_plane_count_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
         csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
     }
     dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
     MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
     MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
     uint32 csg_brush_surfaceref_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlen(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
         csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
     }
     MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
 
     assert(pread==(tagblock->data+tagblock->size));
 
-    if(debug_dump_wr) {
+    if(DEBUG_DUMP_WR) {
         char filename[FILENAME_SIZE] = "";
         strcat(filename, "out.");
         strcat(filename, tagblock->key.s);
@@ -1018,19 +1072,34 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     }
 
     return wr;
-}
 #endif
+}
 
 int main(int argc, char *argv[]) {
-    DBFile *dbfile = dbfile_load("e:/dev/thief/T2FM/test_misdeed/part1v30.mis");
+    // if (argc<2) {
+    //     abort_message("give me a filename!");
+    // }
+    // char *filename = argv[1];
+    const char *filename = "e:/dev/thief/T2FM/test_misdeed/part1v24.mis";
+    // const char *filename = "e:/dev/thief/T2FM/test_misdeed/miss1.mis";
+    dump("File: \"%s\"\n", filename);
+    DBFile *dbfile = dbfile_load(filename);
     DBTagBlock *wr_tagblock;
     wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
     if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
     if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WR");
     assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
 
-    dump("%s read ok, 0x%08x bytes of data.\n", wr_tagblock->key.s, wr_tagblock->size);
+    dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+
+    dump("\n");
+
+    DBTagBlock wr_tagblock2 = {0};
+    wr_save_to_tagblock(&wr_tagblock2, wr);
+    assert(wr_tagblock->size==wr_tagblock2.size);
+    assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
+
     wr_free(&wr);
     //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);
