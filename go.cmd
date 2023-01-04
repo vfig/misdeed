@@ -1,3 +1,3 @@
 @echo off
 cls
-call build && call run
+call build && call run %*
