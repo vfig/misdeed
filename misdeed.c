@@ -817,18 +817,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
 
-    if(DEBUG_DUMP_WR) {
-        uint32 offset = (uint32)(pread-(char *)tagblock->data);
-        uint32 size = tagblock->size-offset;
-        char filename[FILENAME_SIZE] = "";
-        strcat(filename, "in.");
-        strcat(filename, tagblock->key.s);
-        strcat(filename, "_suffix");
-        FILE *f = fopen(filename, "wb");
-        fwrite(pread, size, 1, f);
-        fclose(f);
-    }
-
     if (is_wrext) {
         MEM_READ_ARRAY(wr->cell_weatherzones_array, arrlenu(wr->cell_array), pread);
         if (wr->flags & WorldRepFlagsRenderOptions) {
@@ -927,13 +915,15 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     return wr;
 }
 
-uint32 wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
+void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     assert(tagblock->data==NULL);
     // We write to a 256MB temporary buffer, and at the end we malloc
     // tagblock->data and copy into that. Its not the most efficient
     // way to go about things, but it's simpler, and that's more
     // valuable here.
-    void *buffer = malloc(256UL*1048576UL);
+    uint32 buffer_size = 256UL*1048576UL;
+    void *buffer = malloc(buffer_size);
+
     char *pwrite = buffer;
 
     switch (wr->format) {
@@ -1055,43 +1045,28 @@ uint32 wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     MEM_WRITE(num_animlight_to_cell, pwrite);
     MEM_WRITE_ARRAY(wr->animlight_to_cell_array, pwrite);
 
-#if 0
-
-    uint32 csg_cell_count;
-    MEM_READ(csg_cell_count, pread);
-    assert(csg_cell_count==wr->cell_count);
+    uint32 csg_cell_count = (uint32)arrlenu(wr->cell_array);
+    MEM_WRITE(csg_cell_count, pwrite);
     dump("csg_cell_count: %lu\n", csg_cell_count);
-    uint32 csg_brfaces_count = 0;
-    for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
-        uint32 renderpoly_count;
-        if (is_wrext) {
-            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
-        } else {
-            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
-        }
-        csg_brfaces_count += renderpoly_count;
-    }
+    uint32 csg_brfaces_count = (uint32)arrlenu(wr->csg_brfaces_array);
     dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
-    assert(csg_brfaces_count!=0);
-    MEM_READ_ARRAY(wr->csg_brfaces_array, csg_brfaces_count, pread);
-    uint32 csg_brush_count;
-    MEM_READ(csg_brush_count, pread);
+    MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
+    uint32 csg_brush_count = (uint32)arrlenu(wr->csg_brush_plane_count_array);
+    MEM_WRITE(csg_brush_count, pwrite);
     dump("csg_brush_count: %lu\n", csg_brush_count);
-    MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
-    uint32 csg_brush_plane_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
-        csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
-    }
+    MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
+    uint32 csg_brush_plane_total_count = (uint32)arrlenu(wr->csg_brush_planes_array);
     dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
-    MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
-    MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
-    uint32 csg_brush_surfaceref_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
-        csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
-    }
-    MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
+    MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
+    MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
+    MEM_WRITE_ARRAY(wr->csg_brush_surfacerefs_array, pwrite);
 
-    assert(pread==(tagblock->data+tagblock->size));
+    uint32 size = (uint32)(pwrite-(char *)buffer);
+    assert(size<=buffer_size);
+    tagblock->size = size;
+    tagblock->data = malloc(size);
+    memcpy(tagblock->data, buffer, size);
+    free(buffer);
 
     if(DEBUG_DUMP_WR) {
         char filename[FILENAME_SIZE] = "";
@@ -1101,16 +1076,6 @@ uint32 wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
         fwrite(tagblock->data, tagblock->size, 1, f);
         fclose(f);
     }
-
-    return wr;
-#endif
-
-    // TEMP: this is all crap,just so our incremental write can be memcmp'd:
-    uint32 written_size = (uint32)(pwrite-(char *)buffer);
-    tagblock->size = written_size;
-    tagblock->data = buffer;
-    //free(buffer);
-    return written_size;
 }
 
 int main(int argc, char *argv[]) {
@@ -1135,9 +1100,7 @@ int main(int argc, char *argv[]) {
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
-    uint32 written_size = wr_save_to_tagblock(&wr_tagblock2, wr);
-    assert(memcmp(wr_tagblock->data, wr_tagblock2.data, written_size)==0);
-    dump("TEMP: partial compare ok\n");
+    wr_save_to_tagblock(&wr_tagblock2, wr);
     assert(wr_tagblock->size==wr_tagblock2.size);
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
 #endif
