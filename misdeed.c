@@ -366,6 +366,24 @@ static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
     return hmgetp_null(dbfile->tagblock_hash, name);
 }
 
+static uint32 dbfile_tag_count(DBFile *dbfile) {
+    return (uint32)hmlenu(dbfile->tagblock_hash);
+}
+
+static DBTagBlock *dbfile_tag_at_index(DBFile *dbfile, uint32 index) {
+    return &dbfile->tagblock_hash[index];
+}
+
+static void dbtagblock_copy(DBTagBlock *dest, DBTagBlock *src) {
+    memcpy(dest, src, sizeof(DBTagBlock));
+    if (dest->size > 0) {
+        dest->data = malloc(dest->size);
+        memcpy(dest->data, src->data, dest->size);
+    } else {
+        dest->data = 0;
+    }
+}
+
 static void dbtagblock_wipe(DBTagBlock *tagblock) {
     tagblock->size = 0;
     free(tagblock->data);
@@ -1077,7 +1095,7 @@ int main(int argc, char *argv[]) {
     dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
 
-#if 1
+#if 0
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
@@ -1086,8 +1104,32 @@ int main(int argc, char *argv[]) {
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
 #endif
 
+#if 0
+    dump("All tags:\n");
+    for (uint32 i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
+        DBTagBlock *tag = dbfile_tag_at_index(dbfile, i);
+        dump("  %s\n", tag->key.s);
+    }
+    dump("\n");
+#endif
+
+#if 1
+    // NOTE: This is to test the minimum tagblocks we need for
+    //       Dromed to be okay with the .mis. Turns out only
+    //       FILE_TYPE is needed! But GAM_FILE is useful to keep.
+    DBTagBlock file_type;
+    DBTagBlock gam_file;
+    dbtagblock_copy(&file_type, dbfile_get_tag(dbfile, "FILE_TYPE"));
+    dbtagblock_copy(&gam_file, dbfile_get_tag(dbfile, "GAM_FILE"));
+    DBFile *minimal_dbfile = calloc(1, sizeof(DBFile));
+    filename_copy_str(&(minimal_dbfile->filename), "minimal.mis");
+    minimal_dbfile->version = (LGDBVersion){ 0, 1 };
+    hmputs(minimal_dbfile->tagblock_hash, file_type);
+    hmputs(minimal_dbfile->tagblock_hash, gam_file);
+    dbfile_save(minimal_dbfile, "e:/dev/thief/T2FM/test_misdeed/minimal.mis");
+#endif
+
     wr_free(&wr);
-    //dbfile_save(dbfile, "e:/dev/thief/T2FM/test_misdeed/out.mis");
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
 }
