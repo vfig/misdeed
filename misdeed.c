@@ -78,6 +78,16 @@ void dump(char *fmt, ...) {
 
 #define arrsize(arr) ((arr) ? ((uint32)(arrlenu(arr)*sizeof((arr)[0]))) : 0UL)
 
+#define arrcopy(a,b) do{ \
+    if (b) { \
+        int len = (int)arrlen(b); \
+        arrsetlen((a),len); \
+        memcpy((a),(b),len*sizeof((a)[0])); \
+    } else if (a) { \
+        arrfree(a); \
+        (a) = NULL; \
+    } }while(0)
+
 #define MEM_ZERO(buf, size) memset(buf, 0, size)
 
 #define MEM_READ_SIZE(buf, size, p) \
@@ -250,6 +260,14 @@ typedef struct LGWRPortalPlane {
    LGVector normal;
    float32 plane_constant;
 } LGWRPortalPlane;
+
+#define LGWRBSP_INVALID 0x00FFFFFFUL
+
+typedef enum {
+   kIsLeaf     = 0x01,
+   kIsMarked   = 0x02,
+   kIsReversed = 0x04,
+} LGWRBSPNodeFlags;
 
 typedef struct LGWRBSPNode {
     union {
@@ -727,6 +745,24 @@ void *wr_write_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdat
     return pwrite;
 }
 
+void wr_copy_cell(WorldRepCell *out_cell, WorldRepCell *cell) {
+    MEM_ZERO(out_cell, sizeof(*out_cell));
+    out_cell->is_ext = cell->is_ext;
+    out_cell->header = cell->header;
+    arrcopy(out_cell->vertex_array, cell->vertex_array);
+    arrcopy(out_cell->poly_array, cell->poly_array);
+    arrcopy(out_cell->renderpoly_ext_array, cell->renderpoly_ext_array);
+    arrcopy(out_cell->renderpoly_array, cell->renderpoly_array);
+    arrcopy(out_cell->index_array, cell->index_array);
+    arrcopy(out_cell->plane_array, cell->plane_array);
+    arrcopy(out_cell->animlight_array, cell->animlight_array);
+    arrcopy(out_cell->lightmapinfo_array, cell->lightmapinfo_array);
+    arrcopy(out_cell->light_index_array, cell->light_index_array);
+    out_cell->lightmaps_size = cell->lightmaps_size;
+    out_cell->lightmaps = malloc(out_cell->lightmaps_size);
+    memcpy(out_cell->lightmaps, cell->lightmaps, out_cell->lightmaps_size);
+}
+
 void wr_free(WorldRep **pwr) {
     WorldRep *wr = *pwr;
     for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
@@ -1077,6 +1113,189 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     }
 }
 
+WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
+    // WorldRepFormat format;
+    // WorldRepLightmapFormat lightmap_format;
+    // uint32 flags;                               // = LGWREXTHeader.flags
+    // WorldRepCell *cell_array;
+    // LGWRPortalPlane *bsp_extraplane_array;
+    // LGWRBSPNode *bsp_node_array;
+    // uint8 *cell_weatherzones_array;             // only if WREXT
+    // uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
+    // LGWRWhiteLight *static_whitelight_array;    // only if WR
+    // LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
+    // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
+    // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
+    // LGWRAnimlightToCell *animlight_to_cell_array;
+        // // NOTE: csg_brush_index = (brface>>8)
+        // //       face_index = (brface&0xff)
+        // // TODO: does br=faces mean brush_polys? rename it?
+    // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
+    // int32 *csg_brush_plane_count_array;             // number of planes, per brush
+    // LGWRCSGPlane *csg_brush_planes_array;           // all planes
+    // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
+    // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
+
+
+    assert(wr1->format==wr2->format);
+    assert(wr1->lightmap_format.lightmap_bpp==wr2->lightmap_format.lightmap_bpp);
+    assert(wr1->lightmap_format.lightmap_2x_modulation==wr2->lightmap_format.lightmap_2x_modulation);
+    assert(wr1->lightmap_format.lightmap_scale==wr2->lightmap_format.lightmap_scale);
+    assert(wr1->flags==wr2->flags);
+    WorldRep *wr = calloc(1, sizeof(WorldRep));
+    wr->format = wr1->format;
+    wr->lightmap_format = wr1->lightmap_format;
+    wr->flags = wr1->flags;
+
+    // Cells must be copied individually (their memory is owned by the worldrep).
+    uint32 wr1_cell_count = (uint32)arrlenu(wr1->cell_array);
+    uint32 wr2_cell_count = (uint32)arrlenu(wr2->cell_array);
+    uint32 wr_cell_count = wr1_cell_count+wr2_cell_count;
+    uint32 wr1_cell_start = 0;
+    uint32 wr2_cell_start = wr1_cell_start+wr1_cell_count;
+    arrsetlen(wr->cell_array, wr_cell_count);
+    for (uint32 i=0, j=wr1_cell_start; i<wr1_cell_count; ++i, ++j)
+        wr_copy_cell(&wr->cell_array[j], &wr1->cell_array[i]);
+    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j)
+        wr_copy_cell(&wr->cell_array[j], &wr2->cell_array[i]);
+
+    // BSP extra planes can be copied en masse, but we add our split planes in at the beginning.
+    uint32 split_plane_count = 1;
+    uint32 wr1_bsp_extraplane_count = (uint32)arrlenu(wr1->bsp_extraplane_array);
+    uint32 wr2_bsp_extraplane_count = (uint32)arrlenu(wr2->bsp_extraplane_array);
+    uint32 wr_bsp_extraplane_count = split_plane_count+wr1_bsp_extraplane_count+wr2_bsp_extraplane_count;
+    uint32 wr1_bsp_extraplane_start = split_plane_count;
+    uint32 wr2_bsp_extraplane_start = wr1_bsp_extraplane_start+wr1_bsp_extraplane_count;
+    arrsetlen(wr->bsp_extraplane_array, wr_bsp_extraplane_count);
+    wr->bsp_extraplane_array[0] = split_plane;
+    for (uint32 i=0, j=wr1_bsp_extraplane_start; i<wr1_bsp_extraplane_count; ++i, ++j)
+        wr->bsp_extraplane_array[j] = wr1->bsp_extraplane_array[i];
+    for (uint32 i=0, j=wr2_bsp_extraplane_start; i<wr2_bsp_extraplane_count; ++i, ++j)
+        wr->bsp_extraplane_array[j] = wr2->bsp_extraplane_array[i];
+
+    // BSP nodes can be copied en masse, but need indexes fixed up. And we add
+    // our split node in at the beginning.
+    uint32 split_node_count = 1;
+    uint32 wr1_bsp_node_count = (uint32)arrlenu(wr1->bsp_node_array);
+    uint32 wr2_bsp_node_count = (uint32)arrlenu(wr2->bsp_node_array);
+    uint32 wr_bsp_node_count = split_node_count+wr1_bsp_node_count+wr2_bsp_node_count;
+    uint32 wr1_bsp_node_start = split_node_count;
+    uint32 wr2_bsp_node_start = wr1_bsp_node_start+wr1_bsp_node_count;
+    arrsetlen(wr->bsp_node_array, wr_bsp_node_count);
+    LGWRBSPNode split_node;
+    split_node.parent_index = LGWRBSP_INVALID;
+    split_node.plane_cell_id = -1;
+    split_node.plane_id = 0;
+    split_node.inside_index = wr2_bsp_node_start;
+    split_node.outside_index = wr1_bsp_node_start;
+    wr->bsp_node_array[0] = split_node;
+    for (uint32 i=0, j=wr1_bsp_node_start; i<wr1_bsp_node_count; ++i, ++j)
+        wr->bsp_node_array[j] = wr1->bsp_node_array[i];
+    for (uint32 i=0, j=wr2_bsp_node_start; i<wr2_bsp_node_count; ++i, ++j)
+        wr->bsp_node_array[j] = wr2->bsp_node_array[i];
+    for (uint32 i=wr1_bsp_node_start; i<wr_bsp_node_count; ++i) {
+        LGWRBSPNode *node = &wr->bsp_node_array[i];
+
+        uint32 node_fixup, extraplane_fixup, cell_fixup;
+        if (i<wr2_bsp_node_start) {
+            node_fixup = split_node_count;
+            extraplane_fixup = split_plane_count;
+            cell_fixup = 0;
+        } else {
+            node_fixup = split_node_count+wr1_bsp_node_count;
+            extraplane_fixup = split_plane_count+wr1_bsp_extraplane_count;
+            cell_fixup = wr1_cell_count;
+        }
+
+        uint32 parent_index = (node->parent_index&0x00FFFFFFUL);
+        if (parent_index==LGWRBSP_INVALID) {
+            parent_index = 0;
+        } else {
+            parent_index += node_fixup;
+        }
+        node->parent_index = (node->parent_index&0xFF000000UL)|(parent_index&0x00FFFFFFUL);
+        if (node->plane_cell_id==-1) {
+            node->plane_id += extraplane_fixup;
+        } else {
+            node->plane_cell_id += cell_fixup;
+        }
+
+        if (node->flags&kIsLeaf) {
+            node->cell_id += cell_fixup;
+        } else {
+            node->inside_index += node_fixup;
+            node->outside_index += node_fixup;
+        }
+    }
+
+    // Cell weatherzones can be copied en masse.
+    uint32 wr1_cell_weatherzones_count = (uint32)arrlenu(wr1->cell_weatherzones_array);
+    uint32 wr2_cell_weatherzones_count = (uint32)arrlenu(wr2->cell_weatherzones_array);
+    assert(wr1_cell_weatherzones_count==wr1_cell_count);
+    assert(wr2_cell_weatherzones_count==wr2_cell_count);
+    uint32 wr_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
+    uint32 wr1_cell_weatherzones_start = 0;
+    uint32 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
+    arrsetlen(wr->cell_weatherzones_array, wr_cell_weatherzones_count);
+    for (uint32 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
+        wr->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
+    for (uint32 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
+        wr->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
+
+    // Cell renderoptions can be copied en masse (if present).
+    if (wr->flags&LGWREXTFlagCellRenderOptions) {
+        uint32 wr1_cell_renderoptions_count = (uint32)arrlenu(wr1->cell_renderoptions_array);
+        uint32 wr2_cell_renderoptions_count = (uint32)arrlenu(wr2->cell_renderoptions_array);
+        assert(wr1_cell_renderoptions_count==wr1_cell_count);
+        assert(wr2_cell_renderoptions_count==wr2_cell_count);
+        uint32 wr_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
+        uint32 wr1_cell_renderoptions_start = 0;
+        uint32 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
+        arrsetlen(wr->cell_renderoptions_array, wr_cell_renderoptions_count);
+        for (uint32 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
+            wr->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
+        for (uint32 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
+            wr->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
+    }
+
+    // TEMP: template for the copying of stuff?
+    // uint32 wr1_xxx_count = (uint32)arrlenu(wr1->xxx_array);
+    // uint32 wr2_xxx_count = (uint32)arrlenu(wr2->xxx_array);
+    // uint32 wr_xxx_count = wr1_xxx_count+wr2_xxx_count;
+    // uint32 wr1_xxx_start = 0;
+    // uint32 wr2_xxx_start = wr1_xxx_start+wr1_xxx_count;
+    // arrsetlen(wr->xxx_array, wr_xxx_count);
+    // for (uint32 i=0, j=wr1_xxx_start; i<wr1_xxx_count; ++i, ++j)
+    //     wr->xxx_array[j] = wr1->xxx_array[i];
+    // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
+    //     wr->xxx_array[j] = wr2->xxx_array[i];
+
+    // TODO: for starters, just leave all these NULL too.
+    // LGWRWhiteLight *static_whitelight_array;    // only if WR
+    // LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
+    // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
+    // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
+    // LGWRAnimlightToCell *animlight_to_cell_array;
+
+    // TODO: for starters, just leave all these NULL (and dont copy BRLIST ?).
+    //       later, maybe, *maaaaybe*, try to fix these up too?
+    // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
+    // int32 *csg_brush_plane_count_array;             // number of planes, per brush
+    // LGWRCSGPlane *csg_brush_planes_array;           // all planes
+    // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
+    // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
+
+    return wr;
+}
+
+/*
+okay, where to go from here?
+so first there are _maybe_ other tagblocks that depend on cell info?
+try to find the minimum tagblocks we need to save out for dromed not
+to crash!
+and then we can try merging worldreps, maybe??????
+*/
+
 int main(int argc, char *argv[]) {
     if (argc<2) {
         abort_message("give me a filename!");
@@ -1113,7 +1332,7 @@ int main(int argc, char *argv[]) {
     dump("\n");
 #endif
 
-#if 1
+#if 0
     // NOTE: This is to test the minimum tagblocks we need for
     //       Dromed to be okay with the .mis. Turns out only
     //       FILE_TYPE is needed! But GAM_FILE is useful to keep.
