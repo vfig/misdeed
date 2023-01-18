@@ -1288,21 +1288,37 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     return wr;
 }
 
-/*
-okay, where to go from here?
-so first there are _maybe_ other tagblocks that depend on cell info?
-try to find the minimum tagblocks we need to save out for dromed not
-to crash!
-and then we can try merging worldreps, maybe??????
-*/
+int do_help(int argc, char **argv);
 
-int main(int argc, char *argv[]) {
-    if (argc<2) {
+int do_merge(int argc, char **argv) {
+    abort_message("not done yet");
+}
+
+int do_test_list_tags(int argc, char **argv) {
+    if (argc!=1) {
         abort_message("give me a filename!");
     }
-    char *filename = argv[1];
-    //const char *filename = "e:/dev/thief/T2FM/test_misdeed/part1v24.mis";
-    // const char *filename = "e:/dev/thief/T2FM/test_misdeed/miss1.mis";
+    char *filename = argv[0];
+    dump("File: \"%s\"\n", filename);
+    DBFile *dbfile = dbfile_load(filename);
+
+    dump("All tags:\n");
+    for (uint32 i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
+        DBTagBlock *tag = dbfile_tag_at_index(dbfile, i);
+        dump("  %s\n", tag->key.s);
+    }
+    dump("\n");
+
+    dbfile = dbfile_free(dbfile);
+    dump("Ok.\n");
+    return 0;
+}
+
+int do_test_worldrep(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
+    }
+    char *filename = argv[0];
     dump("File: \"%s\"\n", filename);
     DBFile *dbfile = dbfile_load(filename);
     DBTagBlock *wr_tagblock;
@@ -1313,26 +1329,27 @@ int main(int argc, char *argv[]) {
 
     dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
-
-#if 0
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
     wr_save_to_tagblock(&wr_tagblock2, wr);
     assert(wr_tagblock->size==wr_tagblock2.size);
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
-#endif
 
-#if 0
-    dump("All tags:\n");
-    for (uint32 i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
-        DBTagBlock *tag = dbfile_tag_at_index(dbfile, i);
-        dump("  %s\n", tag->key.s);
+    wr_free(&wr);
+    dbfile = dbfile_free(dbfile);
+    dump("Ok.\n");
+    return 0;
+}
+
+int do_test_write_minimal(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
     }
-    dump("\n");
-#endif
+    char *filename = argv[0];
+    dump("File: \"%s\"\n", filename);
+    DBFile *dbfile = dbfile_load(filename);
 
-#if 0
     // NOTE: This is to test the minimum tagblocks we need for
     //       Dromed to be okay with the .mis. Turns out only
     //       FILE_TYPE is needed! But GAM_FILE is useful to keep.
@@ -1346,9 +1363,57 @@ int main(int argc, char *argv[]) {
     hmputs(minimal_dbfile->tagblock_hash, file_type);
     hmputs(minimal_dbfile->tagblock_hash, gam_file);
     dbfile_save(minimal_dbfile, "e:/dev/thief/T2FM/test_misdeed/minimal.mis");
-#endif
 
-    wr_free(&wr);
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
+    return 0;
+}
+
+struct command { const char *s; int (*func)(int, char **); const char *help; };
+struct command all_commands[] = {
+    { "help", do_help,                              "help [command]: List available commands; show help for a command." },
+    { "test_list_tags", do_test_list_tags,          "test_list_tags: List all tagblocks." },
+    { "test_worldrep", do_test_worldrep,            "test_worldrep: Test reading and writing (to memory) the worldrep." },
+    { "test_write_minimal", do_test_write_minimal,  "test_write_minimal: Test writing a minimal dbfile." },
+    { "merge", do_merge,                            "merge file1.mis file2.mis: Merge two worldreps." },
+    { NULL, NULL },
+};
+
+int do_help(int argc, char **argv) {
+    if (argc>1) {
+        abort_message("Usage: help [command]");
+    }
+    if (argc==0) {
+        fprintf(stderr, "Commands:\n");
+        for (int i=0;; ++i) {
+            struct command c = all_commands[i];
+            if (! c.s || ! c.func) break;
+            fprintf(stderr, "\t%s\n", c.s);
+        }
+        return 0;
+    } else {
+        for (int i=0;; ++i) {
+            struct command c = all_commands[i];
+            if (! c.s || ! c.func) break;
+            if (strcmp(c.s, argv[0])==0) {
+                fprintf(stderr, "%s\n", c.help);
+                return 0;
+            }
+        }
+        abort_format("Unknown command: %s", argv[0]);
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc<2) {
+        abort_format("Usage: %s command ...", argv[0]);
+    }
+    for (int i=0;; ++i) {
+        struct command c = all_commands[i];
+        if (! c.s || ! c.func) break;
+        if (strcmp(c.s, argv[1])==0) {
+            return (c.func)(argc-2, &argv[2]);
+        }
+    }
+    abort_format("Unknown command: %s", argv[1]);
 }
