@@ -261,7 +261,20 @@ typedef struct LGWRPortalPlane {
    float32 plane_constant;
 } LGWRPortalPlane;
 
-#define LGWRBSP_INVALID 0x00FFFFFFUL
+#define BSP_INVALID 0x00FFFFFFUL
+#define BSP_GET_PARENT(node) ((node)->parent_index&0x00FFFFFFUL)
+#define BSP_SET_PARENT(node,new_index) \
+    do { \
+        LGWRBSPNode *n = (node); \
+        n->parent_index = (n->parent_index&0xFF000000UL)|(new_index&0x00FFFFFFUL); \
+    } while(0)
+#define BSP_GET_FLAGS(node) (((node)->parent_index&0xFF000000UL)>>24)
+#define BSP_SET_FLAGS(node,new_flags) \
+    do { \
+        LGWRBSPNode *n = (node); \
+        n->parent_index = ((new_flags<<24)&0xFF000000UL)|(n->parent_index&0x00FFFFFFUL); \
+    } while(0)
+#define BSP_IS_LEAF(node) ((BSP_GET_FLAGS(node)&kIsLeaf)!=0)
 
 typedef enum {
    kIsLeaf     = 0x01,
@@ -915,37 +928,43 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     uint32 csg_cell_count;
     MEM_READ(csg_cell_count, pread);
-    assert(csg_cell_count==arrlenu(wr->cell_array));
-    dump("csg_cell_count: %lu\n", csg_cell_count);
-    uint32 csg_brfaces_count = 0;
-    for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
-        uint32 renderpoly_count;
-        if (is_wrext) {
-            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
-        } else {
-            renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
+    if (csg_cell_count>0) {
+        assert(csg_cell_count==arrlenu(wr->cell_array));
+        dump("csg_cell_count: %lu\n", csg_cell_count);
+        uint32 csg_brfaces_count = 0;
+        for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
+            uint32 renderpoly_count;
+            if (is_wrext) {
+                renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
+            } else {
+                renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
+            }
+            csg_brfaces_count += renderpoly_count;
         }
-        csg_brfaces_count += renderpoly_count;
+        dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
+        assert(csg_brfaces_count!=0);
+        MEM_READ_ARRAY(wr->csg_brfaces_array, csg_brfaces_count, pread);
+        uint32 csg_brush_count;
+        MEM_READ(csg_brush_count, pread);
+        dump("csg_brush_count: %lu\n", csg_brush_count);
+        MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
+        uint32 csg_brush_plane_total_count = 0;
+        for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
+            csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
+        }
+        dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
+        MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
+        MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
+        uint32 csg_brush_surfaceref_total_count = 0;
+        for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+            csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
+        }
+        MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
+    } else {
+        uint32 csg_brush_count;
+        MEM_READ(csg_brush_count, pread);
+        assert(csg_brush_count==0);
     }
-    dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
-    assert(csg_brfaces_count!=0);
-    MEM_READ_ARRAY(wr->csg_brfaces_array, csg_brfaces_count, pread);
-    uint32 csg_brush_count;
-    MEM_READ(csg_brush_count, pread);
-    dump("csg_brush_count: %lu\n", csg_brush_count);
-    MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
-    uint32 csg_brush_plane_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
-        csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
-    }
-    dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
-    MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
-    MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
-    uint32 csg_brush_surfaceref_total_count = 0;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
-        csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
-    }
-    MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
 
     // Ensure we have read all the available data:
     assert(pread==(tagblock->data+tagblock->size));
@@ -958,7 +977,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     return wr;
 }
 
-void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
+void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     assert(tagblock->data==NULL);
     // We write to a 256MB temporary buffer, and at the end we malloc
     // tagblock->data and copy into that. Its not the most efficient
@@ -1080,21 +1099,29 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     MEM_WRITE(num_animlight_to_cell, pwrite);
     MEM_WRITE_ARRAY(wr->animlight_to_cell_array, pwrite);
 
-    uint32 csg_cell_count = (uint32)arrlenu(wr->cell_array);
-    MEM_WRITE(csg_cell_count, pwrite);
-    dump("csg_cell_count: %lu\n", csg_cell_count);
-    uint32 csg_brfaces_count = (uint32)arrlenu(wr->csg_brfaces_array);
-    dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
-    MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
-    uint32 csg_brush_count = (uint32)arrlenu(wr->csg_brush_plane_count_array);
-    MEM_WRITE(csg_brush_count, pwrite);
-    dump("csg_brush_count: %lu\n", csg_brush_count);
-    MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
-    uint32 csg_brush_plane_total_count = (uint32)arrlenu(wr->csg_brush_planes_array);
-    dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
-    MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
-    MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
-    MEM_WRITE_ARRAY(wr->csg_brush_surfacerefs_array, pwrite);
+    if (include_csg) {
+        uint32 csg_cell_count = (uint32)arrlenu(wr->cell_array);
+        MEM_WRITE(csg_cell_count, pwrite);
+        dump("csg_cell_count: %lu\n", csg_cell_count);
+        uint32 csg_brfaces_count = (uint32)arrlenu(wr->csg_brfaces_array);
+        dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
+        MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
+        uint32 csg_brush_count = (uint32)arrlenu(wr->csg_brush_plane_count_array);
+        MEM_WRITE(csg_brush_count, pwrite);
+        dump("csg_brush_count: %lu\n", csg_brush_count);
+        MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
+        uint32 csg_brush_plane_total_count = (uint32)arrlenu(wr->csg_brush_planes_array);
+        dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
+        MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
+        MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
+        MEM_WRITE_ARRAY(wr->csg_brush_surfacerefs_array, pwrite);
+    } else {
+        uint32 csg_cell_count = 0;
+        MEM_WRITE(csg_cell_count, pwrite);
+        dump("csg_cell_count: %lu\n", csg_cell_count);
+        uint32 csg_brush_count = 0;
+        MEM_WRITE(csg_brush_count, pwrite);
+    }
 
     uint32 size = (uint32)(pwrite-(char *)buffer);
     assert(size<=buffer_size);
@@ -1146,6 +1173,7 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     wr->format = wr1->format;
     wr->lightmap_format = wr1->lightmap_format;
     wr->flags = wr1->flags;
+    int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
     // Cells must be copied individually (their memory is owned by the worldrep).
     uint32 wr1_cell_count = (uint32)arrlenu(wr1->cell_array);
@@ -1183,7 +1211,7 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     uint32 wr2_bsp_node_start = wr1_bsp_node_start+wr1_bsp_node_count;
     arrsetlen(wr->bsp_node_array, wr_bsp_node_count);
     LGWRBSPNode split_node;
-    split_node.parent_index = LGWRBSP_INVALID;
+    split_node.parent_index = BSP_INVALID;
     split_node.plane_cell_id = -1;
     split_node.plane_id = 0;
     split_node.inside_index = wr2_bsp_node_start;
@@ -1207,55 +1235,61 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
             cell_fixup = wr1_cell_count;
         }
 
-        uint32 parent_index = (node->parent_index&0x00FFFFFFUL);
-        if (parent_index==LGWRBSP_INVALID) {
+        uint32 parent_index = BSP_GET_PARENT(node);
+        if (parent_index==BSP_INVALID) {
             parent_index = 0;
         } else {
             parent_index += node_fixup;
         }
-        node->parent_index = (node->parent_index&0xFF000000UL)|(parent_index&0x00FFFFFFUL);
+        BSP_SET_PARENT(node, parent_index);
         if (node->plane_cell_id==-1) {
             node->plane_id += extraplane_fixup;
         } else {
             node->plane_cell_id += cell_fixup;
         }
 
-        if (node->flags&kIsLeaf) {
+        if (BSP_IS_LEAF(node)) {
             node->cell_id += cell_fixup;
         } else {
-            node->inside_index += node_fixup;
-            node->outside_index += node_fixup;
+            if (node->inside_index!=BSP_INVALID)
+                node->inside_index += node_fixup;
+            if (node->outside_index!=BSP_INVALID)
+                node->outside_index += node_fixup;
         }
     }
 
     // Cell weatherzones can be copied en masse.
-    uint32 wr1_cell_weatherzones_count = (uint32)arrlenu(wr1->cell_weatherzones_array);
-    uint32 wr2_cell_weatherzones_count = (uint32)arrlenu(wr2->cell_weatherzones_array);
-    assert(wr1_cell_weatherzones_count==wr1_cell_count);
-    assert(wr2_cell_weatherzones_count==wr2_cell_count);
-    uint32 wr_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
-    uint32 wr1_cell_weatherzones_start = 0;
-    uint32 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
-    arrsetlen(wr->cell_weatherzones_array, wr_cell_weatherzones_count);
-    for (uint32 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
-        wr->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
-    for (uint32 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
-        wr->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
+    if (is_wrext) {
+        uint32 wr1_cell_weatherzones_count = (uint32)arrlenu(wr1->cell_weatherzones_array);
+        uint32 wr2_cell_weatherzones_count = (uint32)arrlenu(wr2->cell_weatherzones_array);
+        assert(wr1_cell_weatherzones_count==wr1_cell_count);
+        assert(wr2_cell_weatherzones_count==wr2_cell_count);
+        uint32 wr_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
+        uint32 wr1_cell_weatherzones_start = 0;
+        uint32 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
+        arrsetlen(wr->cell_weatherzones_array, wr_cell_weatherzones_count);
+        for (uint32 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
+            wr->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
+        for (uint32 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
+            wr->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
+    }
 
     // Cell renderoptions can be copied en masse (if present).
-    if (wr->flags&LGWREXTFlagCellRenderOptions) {
-        uint32 wr1_cell_renderoptions_count = (uint32)arrlenu(wr1->cell_renderoptions_array);
-        uint32 wr2_cell_renderoptions_count = (uint32)arrlenu(wr2->cell_renderoptions_array);
-        assert(wr1_cell_renderoptions_count==wr1_cell_count);
-        assert(wr2_cell_renderoptions_count==wr2_cell_count);
-        uint32 wr_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
-        uint32 wr1_cell_renderoptions_start = 0;
-        uint32 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
-        arrsetlen(wr->cell_renderoptions_array, wr_cell_renderoptions_count);
-        for (uint32 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
-            wr->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
-        for (uint32 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
-            wr->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
+    if (is_wrext) {
+        if (wr->flags&LGWREXTFlagCellRenderOptions) {
+            uint32 wr1_cell_renderoptions_count = (uint32)arrlenu(wr1->cell_renderoptions_array);
+            uint32 wr2_cell_renderoptions_count = (uint32)arrlenu(wr2->cell_renderoptions_array);
+            assert(wr1_cell_renderoptions_count==wr1_cell_count);
+            assert(wr2_cell_renderoptions_count==wr2_cell_count);
+            uint32 wr_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
+            uint32 wr1_cell_renderoptions_start = 0;
+            uint32 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
+            arrsetlen(wr->cell_renderoptions_array, wr_cell_renderoptions_count);
+            for (uint32 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
+                wr->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
+            for (uint32 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
+                wr->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
+        }
     }
 
     // TEMP: template for the copying of stuff?
@@ -1291,7 +1325,69 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
 int do_help(int argc, char **argv);
 
 int do_merge(int argc, char **argv) {
-    abort_message("not done yet");
+    if (argc!=2) {
+        abort_message("give me two filenames!");
+    }
+
+    char *filename[2];
+    dump("Files:");
+    for (int i=0; i<2; ++i) {
+        filename[i] = argv[i];
+        dump(" \"%s\"", filename[i]);
+    }
+    dump("\n");
+
+    DBFile *dbfile[2];
+    for (int i=0; i<2; ++i) {
+        dbfile[i] = dbfile_load(filename[i]);
+    }
+
+    WorldRep *wr[2];
+    for (int i=0; i<2; ++i) {
+        DBTagBlock *wr_tagblock;
+        wr_tagblock = dbfile_get_tag(dbfile[i], "WREXT");
+        if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile[i], "WRRGB");
+        if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile[i], "WR");
+        assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
+        dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
+        wr[i] = wr_load_from_tagblock(wr_tagblock);
+        dump("\n");
+    }
+
+    /// OKAAAAAAAAAAY! now we just need to RUN this shit. watch it CRASH AND BURN
+
+    LGWRPortalPlane split_plane;
+    split_plane.normal = (LGVector){ 0.0, 0.0, 1.0 };
+    split_plane.plane_constant = 0.0;
+    WorldRep *merged = wr_merge(wr[0], wr[1], split_plane);
+
+    // it didnt crash yet! save it!
+
+    DBTagBlock file_type;
+    DBTagBlock gam_file;
+    DBTagBlock wr_out = {0};
+    dbtagblock_copy(&file_type, dbfile_get_tag(dbfile[0], "FILE_TYPE"));
+    dbtagblock_copy(&gam_file, dbfile_get_tag(dbfile[1], "GAM_FILE"));
+    wr_save_to_tagblock(&wr_out, merged, 0);
+    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
+    filename_copy_str(&(dbfile_out->filename), "merge_out.mis");
+    dbfile_out->version = (LGDBVersion){ 0, 1 };
+    hmputs(dbfile_out->tagblock_hash, file_type);
+    hmputs(dbfile_out->tagblock_hash, gam_file);
+    hmputs(dbfile_out->tagblock_hash, wr_out);
+    const char *filename_out = "e:/dev/thief/T2FM/test_misdeed/merge_out.mis";
+    dbfile_save(dbfile_out, filename_out);
+    dump("Wrote: \"%s\"\n", filename_out);
+
+    // and clean up maybe?
+
+    wr_free(&merged);
+    for (int i=0; i<2; ++i) {
+        wr_free(&wr[i]);
+        dbfile[i] = dbfile_free(dbfile[i]);
+    }
+    dump("Ok.\n");
+    return 0;
 }
 
 int do_test_list_tags(int argc, char **argv) {
@@ -1309,6 +1405,47 @@ int do_test_list_tags(int argc, char **argv) {
     }
     dump("\n");
 
+    dbfile = dbfile_free(dbfile);
+    dump("Ok.\n");
+    return 0;
+}
+
+void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
+    dump("BSP node %u:\n", index);
+    LGWRBSPNode *node = &nodes[index];
+    dump("  parent: %u, flags: 0x%02x\n", BSP_GET_PARENT(node), BSP_GET_FLAGS(node));
+    dump("  plane_cell_id: %d, plane_id: %d\n", node->plane_cell_id, node->plane_id);
+    if (BSP_IS_LEAF(node)) {
+        dump("  LEAF. cell_id: %u\n", node->cell_id);
+    } else {
+        dump("  NODE. inside: %u, outside: %u\n", node->inside_index, node->outside_index);
+        if (node->inside_index!=BSP_INVALID)
+            dump_bsp_node_recursive(nodes, node->inside_index);
+        if (node->outside_index!=BSP_INVALID)
+            dump_bsp_node_recursive(nodes, node->outside_index);
+    }
+}
+
+int do_dump_bsp(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
+    }
+
+    char *filename = argv[0];
+    dump("File: \"%s\"\n", filename);
+    DBFile *dbfile = dbfile_load(filename);
+    DBTagBlock *wr_tagblock;
+    wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
+    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
+    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WR");
+    assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
+    dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
+    WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+    dump("\n");
+
+    dump_bsp_node_recursive(wr->bsp_node_array, 0);
+
+    wr_free(&wr);
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
     return 0;
@@ -1332,7 +1469,7 @@ int do_test_worldrep(int argc, char **argv) {
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
-    wr_save_to_tagblock(&wr_tagblock2, wr);
+    wr_save_to_tagblock(&wr_tagblock2, wr, 1);
     assert(wr_tagblock->size==wr_tagblock2.size);
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
 
@@ -1376,6 +1513,7 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "test_worldrep: Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "test_write_minimal: Test writing a minimal dbfile." },
     { "merge", do_merge,                            "merge file1.mis file2.mis: Merge two worldreps." },
+    { "dump_bsp", do_dump_bsp,                      "dump_bsp file.mis: dump the BSP tree." },
     { NULL, NULL },
 };
 
