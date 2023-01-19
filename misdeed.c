@@ -1327,6 +1327,7 @@ typedef struct FamilyRemap {
 } FamilyRemap;
 
 FamilyList *family_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tagblock->version.major==1 && tagblock->version.minor==0);
     FamilyList *fams = calloc(1, sizeof(FamilyList));
     char *pread = tagblock->data;
 
@@ -1338,11 +1339,7 @@ FamilyList *family_load_from_tagblock(DBTagBlock *tagblock) {
     fams->is_newdark = (header.record_count==(LGFAMILY_COUNT_MAX_NEWDARK+2));
     MEM_READ(fams->sky_family, pread);
     MEM_READ(fams->water_family, pread);
-    LGFAMILYRecord record;
-    for (uint32 i=0; i<(header.record_count-2); ++i) {
-        MEM_READ(record, pread);
-        arrput(fams->family_array, record);
-    }
+    MEM_READ_ARRAY(fams->family_array, (header.record_count-2), pread);
 
     return fams;
 }
