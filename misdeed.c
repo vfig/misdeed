@@ -120,10 +120,10 @@ void dump(char *fmt, ...) {
 #pragma pack(push, 1)
 
 static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
-static const char TAG_WR[] = "WR";
-static const char TAG_WRRGB[] = "WRRGB";
-static const char TAG_WREXT[] = "WREXT";
-static const char TAG_FAMILY[] = "FAMILY";
+#define TAG_WR      "WR"
+#define TAG_WRRGB   "WRRGB"
+#define TAG_WREXT   "WREXT"
+#define TAG_FAMILY  "FAMILY"
 
 typedef struct LGVector {
     float32 x, y, z;
