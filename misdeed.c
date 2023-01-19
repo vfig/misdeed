@@ -343,6 +343,22 @@ typedef struct LGWRCSGSurfaceRef {
    int16 vertex;
 } LGWRCSGSurfaceRef;
 
+// NOTE: Two additional leading slots are used for sky and (default) water;
+//       these are not included in LGFAMILY_COUNT_MAX_*.
+#define LGFAMILY_COUNT_MAX_OLDDARK 16
+#define LGFAMILY_COUNT_MAX_NEWDARK 32
+#define LGFAMILY_NAME_SIZE 24
+#define LGFAMILY_NAME_NULL "NULL"
+
+typedef struct LGFAMILYHeader {
+    uint32 record_size;
+    uint32 record_count;    // NOTE: includes sky and water slots.
+} LGFAMILYHeader;
+
+typedef struct LGFAMILYRecord {
+    char name[LGFAMILY_NAME_SIZE];
+} LGFAMILYRecord;
+
 #pragma pack(pop)
 
 /** Caution: misdeeds ahead! **/
@@ -1296,6 +1312,132 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     return wr;
 }
 
+/** Family stuff */
+
+typedef struct FamilyList {
+    int is_newdark;
+    LGFAMILYRecord sky_family;
+    LGFAMILYRecord water_family;
+    LGFAMILYRecord *family_array;
+} FamilyList;
+
+typedef struct FamilyRemap {
+    LGFAMILYRecord key;
+    uint32 index;
+} FamilyRemap;
+
+FamilyList *family_load_from_tagblock(DBTagBlock *tagblock) {
+    FamilyList *fams = calloc(1, sizeof(FamilyList));
+    char *pread = tagblock->data;
+
+    LGFAMILYHeader header;
+    MEM_READ(header, pread);
+    assert(header.record_size==LGFAMILY_NAME_SIZE);
+    assert(header.record_count==(LGFAMILY_COUNT_MAX_OLDDARK+2)
+        || header.record_count==(LGFAMILY_COUNT_MAX_NEWDARK+2));
+    fams->is_newdark = (header.record_count==(LGFAMILY_COUNT_MAX_NEWDARK+2));
+    MEM_READ(fams->sky_family, pread);
+    MEM_READ(fams->water_family, pread);
+    LGFAMILYRecord record;
+    for (uint32 i=0; i<(header.record_count-2); ++i) {
+        MEM_READ(record, pread);
+        arrput(fams->family_array, record);
+    }
+
+    return fams;
+}
+
+void family_save_to_tagblock(DBTagBlock *tagblock, FamilyList *fams) {
+    assert(tagblock->data==NULL);
+
+    uint32 count = (uint32)arrlenu(fams->family_array);
+    assert(count==LGFAMILY_COUNT_MAX_OLDDARK
+        || count==LGFAMILY_COUNT_MAX_NEWDARK);
+    tagblock->size = sizeof(LGFAMILYHeader) + count*sizeof(LGFAMILYRecord);
+    tagblock->data = malloc(tagblock->size);
+    char *pwrite = tagblock->data;
+
+    LGFAMILYHeader header;
+    header.record_size = sizeof(LGFAMILYRecord);
+    header.record_count = count+2;
+    MEM_WRITE(header, pwrite);
+    MEM_WRITE(fams->sky_family, pwrite);
+    MEM_WRITE(fams->water_family, pwrite);
+    MEM_WRITE_ARRAY(fams->family_array, pwrite);
+}
+
+void family_merge(FamilyList *fams1, FamilyList *fams2, FamilyList **out_fams, FamilyRemap **out_fams2_remap) {
+    assert(fams1->is_newdark==fams2->is_newdark);
+    uint32 fams1_count = (uint32)arrlenu(fams1->family_array);
+    uint32 fams2_count = (uint32)arrlenu(fams2->family_array);
+    uint32 out_count_max = fams1->is_newdark? LGFAMILY_COUNT_MAX_NEWDARK : LGFAMILY_COUNT_MAX_OLDDARK;
+
+    FamilyRemap *lookup = NULL;
+    FamilyRemap *remap = NULL;
+    FamilyList *merged = calloc(1, sizeof(FamilyList));
+    merged->is_newdark = fams1->is_newdark;
+    merged->sky_family = fams1->sky_family;
+    merged->water_family = fams1->water_family;
+
+    arrsetlen(merged->family_array, out_count_max);
+
+    // Copy in fams1
+    uint32 fams2_start = 0;
+    for (uint32 i=0, iend=fams1_count; i<iend; ++i) {
+        LGFAMILYRecord *record = &fams1->family_array[i];
+        merged->family_array[i] = *record;
+
+        FamilyRemap entry;
+        if (strcmp(record->name, LGFAMILY_NAME_NULL)==0)
+            continue;
+        entry.key = *record;
+        entry.index = i;
+        hmputs(lookup, entry);
+        ++fams2_start;
+    }
+
+    // Copy in fams2
+    for (uint32 i=0, iend=fams2_count, j=fams2_start; i<iend; ++i)
+    {
+        LGFAMILYRecord *record = &fams2->family_array[i];
+        if (strcmp(record->name, LGFAMILY_NAME_NULL)==0)
+            continue;
+        FamilyRemap *matching_entry = hmgetp_null(lookup, *record);
+        FamilyRemap entry;
+        entry.key = *record;
+        if (matching_entry) {
+            entry.index = matching_entry->index;
+        } else {
+            assert(j<out_count_max);
+            merged->family_array[j] = *record;
+            entry.index = j;
+            ++j;
+        }
+        hmputs(remap, entry);
+    }
+    hmfree(lookup);
+
+    // Remap NULLs to the last slot. If something was referencing
+    // a NULL family (can that even happen?) and the last slot after
+    // merging is actually in use, then too bad.
+    FamilyRemap entry = {0};
+    strcpy(entry.key.name, LGFAMILY_NAME_NULL);
+    entry.index = out_count_max-1;
+    hmputs(remap, entry);
+
+    // Fill the rest with nulls
+    LGFAMILYRecord null_record = {0};
+    strcpy(null_record.name, LGFAMILY_NAME_NULL);
+    for (uint32 i=(uint32)arrlenu(merged->family_array), iend=out_count_max; i<iend; ++i) {
+        merged->family_array[i] = null_record;
+    }
+
+    *out_fams = merged;
+    *out_fams2_remap = remap;
+}
+
+/** Commands and stuff */
+
 int do_help(int argc, char **argv);
 
 int do_merge(int argc, char **argv) {
@@ -1323,6 +1465,48 @@ int do_merge(int argc, char **argv) {
         wr[i] = wr_load_from_tagblock(tagblock);
         dump("\n");
     }
+
+    FamilyList *fams[2];
+    for (int i=0; i<2; ++i) {
+        DBTagBlock *tagblock;
+        tagblock = dbfile_get_tag(dbfile[i], TAG_FAMILY);
+        assert_format(tagblock, "No %s tagblock.", TAG_FAMILY);
+        fams[i] = family_load_from_tagblock(tagblock);
+    }
+
+    FamilyList *fams_merged = NULL;
+    FamilyRemap *fams_remap = NULL;
+    family_merge(fams[0], fams[1], &fams_merged, &fams_remap);
+
+    printf("FAMILY 1:\n");
+    printf("sky: %s\n", fams[0]->sky_family.name);
+    printf("water: %s\n", fams[0]->water_family.name);
+    for (uint32 i=0, iend=(uint32)arrlen(fams[0]->family_array); i<iend; ++i) {
+        printf("%02u: %s => %02u\n", i, fams[0]->family_array[i].name, i);
+    }
+    printf("\n");
+
+    printf("FAMILY 2:\n");
+    printf("sky: %s\n", fams[1]->sky_family.name);
+    printf("water: %s\n", fams[1]->water_family.name);
+    for (uint32 i=0, iend=(uint32)arrlen(fams[1]->family_array); i<iend; ++i) {
+        ptrdiff_t n = hmgeti(fams_remap, fams[1]->family_array[i]);
+        printf("%02u: %s => ", i, fams[1]->family_array[i].name);
+        if (n>=0)
+            printf("%02u\n", fams_remap[n].index);
+        else
+            printf("(not in remap)\n");
+    }
+    printf("\n");
+
+    printf("MERGED:\n");
+    printf("sky: %s\n", fams_merged->sky_family.name);
+    printf("water: %s\n", fams_merged->water_family.name);
+    for (uint32 i=0, iend=(uint32)arrlen(fams_merged->family_array); i<iend; ++i) {
+        printf("%02u: %s\n", i, fams_merged->family_array[i].name);
+    }
+    printf("\n");
+    abort_message("---- TEMP: stopping here ----");
 
     /// OKAAAAAAAAAAY! now we just need to RUN this shit. watch it CRASH AND BURN
 
@@ -1357,6 +1541,27 @@ int do_merge(int argc, char **argv) {
         dbfile[i] = dbfile_free(dbfile[i]);
     }
     dump("Ok.\n");
+    return 0;
+}
+
+int do_fam_list(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
+    }
+    char *filename = argv[0];
+    DBFile *dbfile = dbfile_load(filename);
+
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_FAMILY);
+    assert_format(tagblock, "No %s tagblock.", TAG_FAMILY);
+
+    FamilyList *fams = family_load_from_tagblock(tagblock);
+    printf("sky: %s\n", fams->sky_family.name);
+    printf("water: %s\n", fams->water_family.name);
+    for (uint32 i=0, iend=(uint32)arrlen(fams->family_array); i<iend; ++i) {
+        printf("%02u: %s\n", i, fams->family_array[i].name);
+    }
+
+    dbfile = dbfile_free(dbfile);
     return 0;
 }
 
@@ -1504,6 +1709,7 @@ struct command all_commands[] = {
     { "help", do_help,                              " [command]\tList available commands; show help for a command." },
     { "tag_list", do_tag_list,                      " file.mis\tList all tagblocks." },
     { "tag_dump", do_tag_dump,                      " file.mis tag\tDump tagblock to file." },
+    { "fam_list", do_fam_list,                      " file.mis\tList all families." },
     { "test_worldrep", do_test_worldrep,            " file.mis\tTest reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  " input.mis\tTest writing a minimal dbfile." },
     { "merge", do_merge,                            " file1.mis file2.mis\tMerge two worldreps." },
