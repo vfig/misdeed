@@ -1700,17 +1700,18 @@ int do_test_write_minimal(int argc, char **argv) {
 struct command {
     const char *s;
     int (*func)(int, char **);
+    const char *args;
     const char *help;
 };
 struct command all_commands[] = {
-    { "help", do_help,                              " [command]\tList available commands; show help for a command." },
-    { "tag_list", do_tag_list,                      " file.mis\tList all tagblocks." },
-    { "tag_dump", do_tag_dump,                      " file.mis tag\tDump tagblock to file." },
-    { "fam_list", do_fam_list,                      " file.mis\tList all families." },
-    { "test_worldrep", do_test_worldrep,            " file.mis\tTest reading and writing (to memory) the worldrep." },
-    { "test_write_minimal", do_test_write_minimal,  " input.mis\tTest writing a minimal dbfile." },
-    { "merge", do_merge,                            " file1.mis file2.mis\tMerge two worldreps." },
-    { "dump_bsp", do_dump_bsp,                      " file.mis\tdump the BSP tree." },
+    { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
+    { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
+    { "tag_dump", do_tag_dump,                      "file.mis tag",         "Dump tagblock to file." },
+    { "fam_list", do_fam_list,                      "file.mis",             "List loaded families." },
+    { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
+    { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
+    { "merge", do_merge,                            "file1.mis file2.mis",  "Merge two worldreps." },
+    { "dump_bsp", do_dump_bsp,                      "file.mis",             "dump the BSP tree." },
     { NULL, NULL },
 };
 
@@ -1723,7 +1724,7 @@ int do_help(int argc, char **argv) {
         for (int i=0;; ++i) {
             struct command c = all_commands[i];
             if (! c.s || ! c.func) break;
-            fprintf(stderr, "\t%s %s\n", c.s, c.help);
+            fprintf(stderr, "\t%s %s:\t\t%s\n", c.s, c.args, c.help);
         }
         return 0;
     } else {
