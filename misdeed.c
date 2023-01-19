@@ -362,6 +362,7 @@ typedef struct LGFAMILYRecord {
 
 #define LGTXLIST_TOKEN_NAME_SIZE 16
 #define LGTXLIST_ITEM_NAME_SIZE 15
+#define LGTXLIST_NAME_NULL "null"
 
 typedef struct LGTXLISTHeader {
     uint32 size;
@@ -1459,17 +1460,22 @@ void family_merge(FamilyList *fams1, FamilyList *fams2, FamilyList **out_fams, F
 #define TEXTURE_ENTRY_NAME_SIZE \
     (4*(LGTXLIST_TOKEN_NAME_SIZE+1)+LGTXLIST_ITEM_NAME_SIZE+1)
 
-typedef struct TextureEntry {
+typedef struct TextureRecord {
     char name[TEXTURE_ENTRY_NAME_SIZE];
-} TextureEntry;
+} TextureRecord;
 
 typedef struct TextureList {
-    TextureEntry *tex_array;
+    TextureRecord *tex_array;
 } TextureList;
+
+typedef struct TextureRemap {
+    TextureRecord key;
+    uint32 index;
+} TextureRemap;
 
 TextureList *txlist_load_from_tagblock(DBTagBlock *tagblock) {
     assert(tagblock->version.major==1 && tagblock->version.minor==0);
-    TextureList *txlist = calloc(1, sizeof(TextureList));
+    TextureList *texs = calloc(1, sizeof(TextureList));
     char *pread = tagblock->data;
 
     LGTXLISTHeader header;
@@ -1483,21 +1489,83 @@ TextureList *txlist_load_from_tagblock(DBTagBlock *tagblock) {
 
     for (uint32 i=0; i<header.item_count; ++i) {
         LGTXLISTItem *item = &items[i];
-        TextureEntry entry = {0};
+        TextureRecord record = {0};
         for (uint32 j=0; j<4; ++j) {
             char t = item->tokens[j];
             if (t==0) break;
-            strcat(entry.name, tokens[t-1].name);
-            strcat(entry.name, "/");
+            strcat(record.name, tokens[t-1].name);
+            strcat(record.name, "/");
         }
-        strcat(entry.name, item->name);
-        arrput(txlist->tex_array, entry);
+        strcat(record.name, item->name);
+        arrput(texs->tex_array, record);
     }
 
     arrfree(tokens);
     arrfree(items);
 
-    return txlist;
+    return texs;
+}
+
+void txlist_merge(TextureList *texs1, TextureList *texs2, TextureList **out_texs, TextureRemap **out_texs2_remap) {
+    TextureRemap *lookup = NULL;
+    // TODO: remap here needs to be remapping the ids here, not the names!
+    //       also set hmdefault() of it to 0?? BUT we need to handle SKY
+    //       and stuff sensibly!
+    TextureRemap *remap = NULL;
+    TextureList *merged = calloc(1, sizeof(TextureList));
+    TextureRecord null_record = {0};
+    strcpy(null_record.name, LGTXLIST_NAME_NULL);
+
+    uint32 texs1_count = (uint32)arrlenu(texs1->tex_array);
+    uint32 texs2_count = (uint32)arrlenu(texs2->tex_array);
+
+    // Copy in texs1
+    uint32 texs2_start = 1;
+    for (uint32 i=0, iend=texs1_count; i<iend; ++i) {
+        TextureRecord *record = &texs1->tex_array[i];
+        arrput(merged->tex_array, *record);
+
+        TextureRemap entry;
+        if (strcmp(record->name, LGTXLIST_NAME_NULL)==0) {
+            printf("## skipping %d: %s\n", i, record->name);
+            continue;
+        }
+        entry.key = *record;
+        entry.index = i;
+        hmputs(lookup, entry);
+        ++texs2_start;
+    }
+
+    // Copy in non-null texs2
+    for (uint32 i=0, iend=texs2_count, j=texs2_start; i<iend; ++i)
+    {
+        TextureRecord *record = &texs2->tex_array[i];
+        if (strcmp(record->name, LGTXLIST_NAME_NULL)==0) {
+            printf("## skipping %d: %s\n", i, record->name);
+            continue;
+        }
+        TextureRemap *matching_entry = hmgetp_null(lookup, *record);
+        TextureRemap entry;
+        entry.key = *record;
+        if (matching_entry) {
+            entry.index = matching_entry->index;
+        } else {
+            // Entries 247-255 (inclusive) are reserved.
+            while (j>=247 && j<=255) {
+                arrput(merged->tex_array, null_record);
+                ++j;
+            }
+
+            arrput(merged->tex_array, *record);
+            entry.index = j;
+            ++j;
+        }
+        hmputs(remap, entry);
+    }
+    hmfree(lookup);
+
+    *out_texs = merged;
+    *out_texs2_remap = remap;
 }
 
 /** Commands and stuff */
@@ -1529,6 +1597,45 @@ int do_merge(int argc, char **argv) {
         wr[i] = wr_load_from_tagblock(tagblock);
         dump("\n");
     }
+
+    TextureList *texs[2];
+    for (int i=0; i<2; ++i) {
+        DBTagBlock *tagblock;
+        tagblock = dbfile_get_tag(dbfile[i], TAG_TXLIST);
+        assert_format(tagblock, "No %s tagblock.", TAG_TXLIST);
+        texs[i] = txlist_load_from_tagblock(tagblock);
+    }
+
+    TextureList *texs_merged = NULL;
+    TextureRemap *texs_remap = NULL;
+    txlist_merge(texs[0], texs[1], &texs_merged, &texs_remap);
+
+    printf("TXLIST 1:\n");
+    for (uint32 i=0, iend=(uint32)arrlenu(texs[0]->tex_array); i<iend; ++i) {
+        TextureRecord *record = &texs[0]->tex_array[i];
+        printf("%u: %s\n", i, record->name);
+    }
+    printf("\n");
+
+    printf("TXLIST 2:\n");
+    for (uint32 i=0, iend=(uint32)arrlenu(texs[1]->tex_array); i<iend; ++i) {
+        TextureRecord *record = &texs[1]->tex_array[i];
+        ptrdiff_t n = hmgeti(texs_remap, *record);
+        printf("%02u: %s => ", i, record->name);
+        if (n>=0)
+            printf("%02u\n", texs_remap[n].index);
+        else
+            printf("(not in remap)\n");
+    }
+    printf("\n");
+
+    printf("MERGED:\n");
+    for (uint32 i=0, iend=(uint32)arrlenu(texs_merged->tex_array); i<iend; ++i) {
+        TextureRecord *record = &texs_merged->tex_array[i];
+        printf("%u: %s\n", i, record->name);
+    }
+    printf("\n");
+    abort_message("---- TEMP: stopping here ----");
 
     FamilyList *fams[2];
     for (int i=0; i<2; ++i) {
@@ -1684,8 +1791,8 @@ int do_tex_list(int argc, char **argv) {
     TextureList *txlist = txlist_load_from_tagblock(tagblock);
 
     for (uint32 i=0, iend=(uint32)arrlenu(txlist->tex_array); i<iend; ++i) {
-        TextureEntry *entry = &txlist->tex_array[i];
-        dump("%u: %s\n", i, entry->name);
+        TextureRecord *record = &txlist->tex_array[i];
+        dump("%u: %s\n", i, record->name);
     }
 
     dbfile = dbfile_free(dbfile);
