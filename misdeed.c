@@ -124,6 +124,7 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 #define TAG_WRRGB   "WRRGB"
 #define TAG_WREXT   "WREXT"
 #define TAG_FAMILY  "FAMILY"
+#define TAG_TXLIST  "TXLIST"
 
 typedef struct LGVector {
     float32 x, y, z;
@@ -358,6 +359,25 @@ typedef struct LGFAMILYHeader {
 typedef struct LGFAMILYRecord {
     char name[LGFAMILY_NAME_SIZE];
 } LGFAMILYRecord;
+
+#define LGTXLIST_TOKEN_NAME_SIZE 16
+#define LGTXLIST_ITEM_NAME_SIZE 15
+
+typedef struct LGTXLISTHeader {
+    uint32 size;
+    uint32 item_count;
+    uint32 token_count;
+} LGTXLISTHeader;
+
+typedef struct LGTXLISTToken {
+    char name[LGTXLIST_TOKEN_NAME_SIZE];
+} LGTXLISTToken;
+
+typedef struct LGTXLISTItem {
+    char tokens[4];
+    char name[LGTXLIST_ITEM_NAME_SIZE];
+    char pad;
+} LGTXLISTItem;
 
 #pragma pack(pop)
 
@@ -1433,6 +1453,53 @@ void family_merge(FamilyList *fams1, FamilyList *fams2, FamilyList **out_fams, F
     *out_fams2_remap = remap;
 }
 
+/** Texture stuff */
+
+// Up to 4 tokens each with a trailing /, then the name and null terminator.
+#define TEXTURE_ENTRY_NAME_SIZE \
+    (4*(LGTXLIST_TOKEN_NAME_SIZE+1)+LGTXLIST_ITEM_NAME_SIZE+1)
+
+typedef struct TextureEntry {
+    char name[TEXTURE_ENTRY_NAME_SIZE];
+} TextureEntry;
+
+typedef struct TextureList {
+    TextureEntry *tex_array;
+} TextureList;
+
+TextureList *txlist_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tagblock->version.major==1 && tagblock->version.minor==0);
+    TextureList *txlist = calloc(1, sizeof(TextureList));
+    char *pread = tagblock->data;
+
+    LGTXLISTHeader header;
+    MEM_READ(header, pread);
+    assert(header.size==tagblock->size);
+
+    LGTXLISTToken *tokens = NULL;
+    MEM_READ_ARRAY(tokens, header.token_count, pread);
+    LGTXLISTItem *items = NULL;
+    MEM_READ_ARRAY(items, header.item_count, pread);
+
+    for (uint32 i=0; i<header.item_count; ++i) {
+        LGTXLISTItem *item = &items[i];
+        TextureEntry entry = {0};
+        for (uint32 j=0; j<4; ++j) {
+            char t = item->tokens[j];
+            if (t==0) break;
+            strcat(entry.name, tokens[t-1].name);
+            strcat(entry.name, "/");
+        }
+        strcat(entry.name, item->name);
+        arrput(txlist->tex_array, entry);
+    }
+
+    arrfree(tokens);
+    arrfree(items);
+
+    return txlist;
+}
+
 /** Commands and stuff */
 
 int do_help(int argc, char **argv);
@@ -1606,6 +1673,25 @@ int do_tag_dump(int argc, char **argv) {
     return 0;
 }
 
+int do_tex_list(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
+    }
+    char *filename = argv[0];
+    DBFile *dbfile = dbfile_load(filename);
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_TXLIST);
+    assert_format(tagblock, "No %s tagblock.", TAG_TXLIST);
+    TextureList *txlist = txlist_load_from_tagblock(tagblock);
+
+    for (uint32 i=0, iend=(uint32)arrlenu(txlist->tex_array); i<iend; ++i) {
+        TextureEntry *entry = &txlist->tex_array[i];
+        dump("%u: %s\n", i, entry->name);
+    }
+
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
 void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
     dump("BSP node %u:\n", index);
     LGWRBSPNode *node = &nodes[index];
@@ -1708,6 +1794,7 @@ struct command all_commands[] = {
     { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
     { "tag_dump", do_tag_dump,                      "file.mis tag",         "Dump tagblock to file." },
     { "fam_list", do_fam_list,                      "file.mis",             "List loaded families." },
+    { "tex_list", do_tex_list,                      "file.mis",             "List all textures." },
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "file1.mis file2.mis",  "Merge two worldreps." },
