@@ -10,11 +10,6 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
-/** debug shit **/
-
-static int DEBUG_DUMP_WR = 1;
-
-
 /** useful shit **/
 
 typedef int8_t int8;
@@ -125,6 +120,10 @@ void dump(char *fmt, ...) {
 #pragma pack(push, 1)
 
 static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
+static const char TAG_WR[] = "WR";
+static const char TAG_WRRGB[] = "WRRGB";
+static const char TAG_WREXT[] = "WREXT";
+static const char TAG_FAMILY[] = "FAMILY";
 
 typedef struct LGVector {
     float32 x, y, z;
@@ -425,6 +424,7 @@ DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
     filename_copy_str(&(dbfile->filename), filename);
     FILE *file = fopen(filename, "rb");
+    assert(file);
 
     LGDBFileHeader header;
     FILE_READ(header, file);
@@ -475,6 +475,7 @@ void dbfile_save(DBFile *dbfile, const char *filename) {
     filename_append_str(&temp_filename, "~tmp");
 
     FILE *file = fopen(temp_filename.s, "wb");
+    assert(file);
     #define WRITE_SIZE(buf, size) \
         do { \
         size_t n = fwrite(buf, size, 1, file); \
@@ -537,6 +538,15 @@ DBFile *dbfile_free(DBFile *dbfile) {
     return NULL;
 }
 
+DBTagBlock *dbfile_get_wr_tagblock(DBFile *dbfile) {
+    DBTagBlock *tagblock;
+    tagblock = dbfile_get_tag(dbfile, TAG_WREXT);
+    if (! tagblock) tagblock = dbfile_get_tag(dbfile, TAG_WRRGB);
+    if (! tagblock) tagblock = dbfile_get_tag(dbfile, TAG_WR);
+    assert_format(tagblock, "No %s/%s/%s tagblock.", TAG_WR, TAG_WRRGB, TAG_WREXT);
+    return tagblock;
+}
+
 /** WorldRep stuff */
 
 typedef struct WorldRepCell {
@@ -582,10 +592,10 @@ typedef struct WorldRep {
     LGWRBSPNode *bsp_node_array;
     uint8 *cell_weatherzones_array;             // only if WREXT
     uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
-    LGWRWhiteLight *static_whitelight_array;    // only if WR
-    LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
-    LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
-    LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
+    uint32 num_static_lights;                   // NOTE: num_static_lights+num_dynamic_lights
+    uint32 num_dynamic_lights;                  //       will == arrlen(light_*_array).
+    LGWRWhiteLight *light_white_array;          // only if WR
+    LGWRRGBLight *light_rgb_array;              // only if WRRGB/WREXT
 
     LGWRAnimlightToCell *animlight_to_cell_array;
     // NOTE: csg_brush_index = (brface>>8)
@@ -786,10 +796,8 @@ void wr_free(WorldRep **pwr) {
     arrfree(wr->bsp_node_array);
     arrfree(wr->cell_weatherzones_array);
     arrfree(wr->cell_renderoptions_array);
-    arrfree(wr->static_whitelight_array);
-    arrfree(wr->static_rgblight_array);
-    arrfree(wr->dynamic_whitelight_array);
-    arrfree(wr->dynamic_rgblight_array);
+    arrfree(wr->light_white_array);
+    arrfree(wr->light_rgb_array);
     arrfree(wr->animlight_to_cell_array);
     arrfree(wr->csg_brfaces_array);
     arrfree(wr->csg_brush_plane_count_array);
@@ -804,11 +812,11 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     WorldRep *wr = calloc(1, sizeof(WorldRep));
     char *pread = tagblock->data;
 
-    if (tag_name_eq(tagblock->key, tag_name_from_str("WR"))) {
+    if (tag_name_eq(tagblock->key, tag_name_from_str(TAG_WR))) {
         wr->format = WorldRepFormatWR;
-    } else if (tag_name_eq(tagblock->key, tag_name_from_str("WRRGB"))) {
+    } else if (tag_name_eq(tagblock->key, tag_name_from_str(TAG_WRRGB))) {
         wr->format = WorldRepFormatWRRGB;
-    } else if (tag_name_eq(tagblock->key, tag_name_from_str("WREXT"))) {
+    } else if (tag_name_eq(tagblock->key, tag_name_from_str(TAG_WREXT))) {
         wr->format = WorldRepFormatWREXT;
     } else {
         abort_format("%s not supported for WorldRep.", tagblock->key.s);
@@ -820,15 +828,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         "%s %d.%d not supported.", tagblock->key.s, tagblock->version.major, tagblock->version.minor);
     int is_wr = (wr->format==WorldRepFormatWR);
     int is_wrext = (wr->format==WorldRepFormatWREXT);
-
-    if(DEBUG_DUMP_WR) {
-        char filename[FILENAME_SIZE] = "";
-        strcat(filename, "in.");
-        strcat(filename, tagblock->key.s);
-        FILE *f = fopen(filename, "wb");
-        fwrite(tagblock->data, tagblock->size, 1, f);
-        fclose(f);
-    }
 
     dump("%s chunk:\n", tagblock->key.s);
     dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
@@ -880,46 +879,32 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         }
     }
 
-    if(DEBUG_DUMP_WR) {
-        dump("Zones:\n");
-        for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_weatherzones_array); i<iend; ++i) {
-            uint8 zone = wr->cell_weatherzones_array[i];
-            dump("  %4lu: fog %2u, ambient %2u (raw 0x%02lx)\n", i, LGWRCellWeatherFog(zone), LGWRCellWeatherAmbient(zone), zone);
-        }
-        if (wr->flags & LGWREXTFlagCellRenderOptions) {
-            dump("Render Options:\n");
-            for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_renderoptions_array); i<iend; ++i) {
-                uint8 opts = wr->cell_renderoptions_array[i];
-                dump("  %4lu: envmap %2u (raw 0x%02x)\n", i, LGWRCellEnvironmentMap(opts), opts);
-            }
-        }
+    MEM_READ(wr->num_static_lights, pread);
+    MEM_READ(wr->num_dynamic_lights, pread);
+    uint32 num_total_lights = wr->num_static_lights+wr->num_dynamic_lights;
+    // WR,WRRGB always store 768 light records, even when there are
+    // fewer total lights. Skip the remainder.
+    // NOTE: Dromed's test for this is if ext_header.wr_version<3; I think
+    //       that means it assigns version 1 to T1/TG WR, and version 2 to
+    //       T2 WRRGB -- but I am not certain.
+    uint32 num_extra_light_records = is_wrext? 0 : (768-num_total_lights);
+    if (is_wr) {
+        MEM_READ_ARRAY(wr->light_white_array, num_total_lights, pread);
+        pread += num_extra_light_records*sizeof(LGWRWhiteLight);
+    } else {
+        MEM_READ_ARRAY(wr->light_rgb_array, num_total_lights, pread);
+        pread += num_extra_light_records*sizeof(LGWRRGBLight);
     }
 
-    uint32 num_static_lights;
-    MEM_READ(num_static_lights, pread);
-    uint32 num_dynamic_lights;
-    MEM_READ(num_dynamic_lights, pread);
-
-    // WR,WRRGB always store 768 static light records, even when there are
-    // fewer static lights. Skip the remainder.
-    uint32 num_extra_static_light_records = is_wrext ? 0 : (768-num_static_lights);
+    // WR,WRRGB,WREXT always store 32 additioanl light records for some reason!
+    // In the code they're "light_this", used as a scratchpad for adding up
+    // lighting contributions for an object. Kind of a bug that they are written
+    // to the worldrep! Skip reading them.
+    uint32 num_objlight_records = 32;
     if (is_wr) {
-        MEM_READ_ARRAY(wr->static_whitelight_array, num_static_lights, pread);
-        pread += num_extra_static_light_records*sizeof(LGWRWhiteLight);
+        pread += num_objlight_records*sizeof(LGWRWhiteLight);
     } else {
-        MEM_READ_ARRAY(wr->static_rgblight_array, num_static_lights, pread);
-        pread += num_extra_static_light_records*sizeof(LGWRRGBLight);
-    }
-
-    // WR,WRRGB,WREXT always store 32 dynamic light records, even when there are
-    // fewer dynamic lights. Skip the remainder.
-    uint32 num_extra_dynamic_light_records = (32-num_dynamic_lights);
-    if (is_wr) {
-        MEM_READ_ARRAY(wr->dynamic_whitelight_array, num_dynamic_lights, pread);
-        pread += num_extra_dynamic_light_records*sizeof(LGWRWhiteLight);
-    } else {
-        MEM_READ_ARRAY(wr->dynamic_rgblight_array, num_dynamic_lights, pread);
-        pread += num_extra_dynamic_light_records*sizeof(LGWRRGBLight);
+        pread += num_objlight_records*sizeof(LGWRRGBLight);
     }
 
     uint32 num_animlight_to_cell;
@@ -989,9 +974,9 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     char *pwrite = buffer;
 
     switch (wr->format) {
-    case WorldRepFormatWR: tagblock->key = tag_name_from_str("WR"); break;
-    case WorldRepFormatWRRGB: tagblock->key = tag_name_from_str("WRRGB"); break;
-    case WorldRepFormatWREXT: tagblock->key = tag_name_from_str("WREXT"); break;
+    case WorldRepFormatWR: tagblock->key = tag_name_from_str(TAG_WR); break;
+    case WorldRepFormatWRRGB: tagblock->key = tag_name_from_str(TAG_WRRGB); break;
+    case WorldRepFormatWREXT: tagblock->key = tag_name_from_str(TAG_WREXT); break;
     default:
         abort_message("Invalid WorldRepFormat.");
         /* die */
@@ -1049,48 +1034,46 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
         }
     }
 
-    uint32 num_static_lights;
-    uint32 num_dynamic_lights;
+    uint32 num_total_lights;
     if (is_wr) {
-        num_static_lights = (uint32)arrlenu(wr->static_whitelight_array);
-        num_dynamic_lights = (uint32)arrlenu(wr->dynamic_whitelight_array);
+        num_total_lights = (uint32)arrlenu(wr->light_white_array);
     } else {
-        num_static_lights = (uint32)arrlenu(wr->static_rgblight_array);
-        num_dynamic_lights = (uint32)arrlenu(wr->dynamic_rgblight_array);
+        num_total_lights = (uint32)arrlenu(wr->light_rgb_array);
     }
-    MEM_WRITE(num_static_lights, pwrite);
-    MEM_WRITE(num_dynamic_lights, pwrite);
+    assert(wr->num_static_lights+wr->num_dynamic_lights==num_total_lights);
+    MEM_WRITE(wr->num_static_lights, pwrite);
+    MEM_WRITE(wr->num_dynamic_lights, pwrite);
 
-    // WR,WRRGB always store 768 static light records, even when there are
-    // fewer static lights. Zero the remainder.
-    uint32 num_extra_static_light_records = is_wrext ? 0 : (768-num_static_lights);
+    // WR,WRRGB always store 768 light records, even when there are
+    // fewer total lights. Zero the remainder.
+    uint32 num_extra_light_records = is_wrext ? 0 : (768-num_total_lights);
     if (is_wr) {
-        MEM_WRITE_ARRAY(wr->static_whitelight_array, pwrite);
+        MEM_WRITE_ARRAY(wr->light_white_array, pwrite);
         LGWRWhiteLight dummy = {0};
-        for (uint32 i=0, iend=num_extra_static_light_records; i<iend; ++i) {
+        for (uint32 i=0, iend=num_extra_light_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
         }
     } else {
-        MEM_WRITE_ARRAY(wr->static_rgblight_array, pwrite);
+        MEM_WRITE_ARRAY(wr->light_rgb_array, pwrite);
         LGWRRGBLight dummy = {0};
-        for (uint32 i=0, iend=num_extra_static_light_records; i<iend; ++i) {
+        for (uint32 i=0, iend=num_extra_light_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
         }
     }
 
-    // WR,WRRGB,WREXT always store 32 dynamic light records, even when there are
-    // fewer dynamic lights. Zero the remainder.
-    uint32 num_extra_dynamic_light_records = (32-num_dynamic_lights);
+    // WR,WRRGB,WREXT always store 32 additioanl light records for some reason!
+    // In the code they're "light_this", used as a scratchpad for adding up
+    // lighting contributions for an object. Kind of a bug that they are written
+    // to the worldrep! Zero them.
+    uint32 num_objlight_records = 32;
     if (is_wr) {
-        MEM_WRITE_ARRAY(wr->dynamic_whitelight_array, pwrite);
         LGWRWhiteLight dummy = {0};
-        for (uint32 i=0, iend=num_extra_dynamic_light_records; i<iend; ++i) {
+        for (uint32 i=0, iend=num_objlight_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
         }
     } else {
-        MEM_WRITE_ARRAY(wr->dynamic_rgblight_array, pwrite);
         LGWRRGBLight dummy = {0};
-        for (uint32 i=0, iend=num_extra_dynamic_light_records; i<iend; ++i) {
+        for (uint32 i=0, iend=num_objlight_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
         }
     }
@@ -1129,15 +1112,6 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     tagblock->data = malloc(size);
     memcpy(tagblock->data, buffer, size);
     free(buffer);
-
-    if(DEBUG_DUMP_WR) {
-        char filename[FILENAME_SIZE] = "";
-        strcat(filename, "out.");
-        strcat(filename, tagblock->key.s);
-        FILE *f = fopen(filename, "wb");
-        fwrite(tagblock->data, tagblock->size, 1, f);
-        fclose(f);
-    }
 }
 
 WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
@@ -1344,13 +1318,9 @@ int do_merge(int argc, char **argv) {
 
     WorldRep *wr[2];
     for (int i=0; i<2; ++i) {
-        DBTagBlock *wr_tagblock;
-        wr_tagblock = dbfile_get_tag(dbfile[i], "WREXT");
-        if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile[i], "WRRGB");
-        if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile[i], "WR");
-        assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
-        dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
-        wr[i] = wr_load_from_tagblock(wr_tagblock);
+        DBTagBlock *tagblock = dbfile_get_wr_tagblock(dbfile[i]);
+        dump("%s read ok, 0x%08x bytes of data.\n\n", tagblock->key.s, tagblock->size);
+        wr[i] = wr_load_from_tagblock(tagblock);
         dump("\n");
     }
 
@@ -1390,23 +1360,47 @@ int do_merge(int argc, char **argv) {
     return 0;
 }
 
-int do_test_list_tags(int argc, char **argv) {
+int do_tag_list(int argc, char **argv) {
     if (argc!=1) {
         abort_message("give me a filename!");
     }
     char *filename = argv[0];
-    dump("File: \"%s\"\n", filename);
     DBFile *dbfile = dbfile_load(filename);
 
-    dump("All tags:\n");
     for (uint32 i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
         DBTagBlock *tag = dbfile_tag_at_index(dbfile, i);
-        dump("  %s\n", tag->key.s);
+        printf("%s\n", tag->key.s);
     }
-    dump("\n");
-
     dbfile = dbfile_free(dbfile);
-    dump("Ok.\n");
+    return 0;
+}
+
+int do_tag_dump(int argc, char **argv) {
+    if (argc!=2) {
+        abort_message("give me a filename and a tag name!");
+    }
+    char *filename = argv[0];
+    DBFile *dbfile = dbfile_load(filename);
+
+    char *tag = argv[1];
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, tag);
+    assert_format(tagblock, "No %s tagblock.", tag);
+    dump("%s version %u.%u: 0x%08x bytes",
+        tagblock->key.s,
+        tagblock->version.major,
+        tagblock->version.minor,
+        tagblock->size);
+
+    FileName out_filename = {0};
+    strcpy(out_filename.s, tag);
+    strcat(out_filename.s, ".tagblock");
+    FILE *outf = fopen(out_filename.s, "wb");
+    assert(outf);
+    fwrite(tagblock->data, tagblock->size, 1, outf);
+    fclose(outf);
+
+    dump(" written to \"%s\"\n", out_filename);
+    dbfile = dbfile_free(dbfile);
     return 0;
 }
 
@@ -1434,11 +1428,7 @@ int do_dump_bsp(int argc, char **argv) {
     char *filename = argv[0];
     dump("File: \"%s\"\n", filename);
     DBFile *dbfile = dbfile_load(filename);
-    DBTagBlock *wr_tagblock;
-    wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
-    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
-    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WR");
-    assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
     dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
     dump("\n");
@@ -1458,11 +1448,7 @@ int do_test_worldrep(int argc, char **argv) {
     char *filename = argv[0];
     dump("File: \"%s\"\n", filename);
     DBFile *dbfile = dbfile_load(filename);
-    DBTagBlock *wr_tagblock;
-    wr_tagblock = dbfile_get_tag(dbfile, "WREXT");
-    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WRRGB");
-    if (! wr_tagblock) wr_tagblock = dbfile_get_tag(dbfile, "WR");
-    assert_message(wr_tagblock, "No WREXT/WRRGB/WR tagblock.");
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
 
     dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
@@ -1471,6 +1457,9 @@ int do_test_worldrep(int argc, char **argv) {
     DBTagBlock wr_tagblock2 = {0};
     wr_save_to_tagblock(&wr_tagblock2, wr, 1);
     assert(wr_tagblock->size==wr_tagblock2.size);
+    // BUG: this memcmp() will fail because we don't preserve the light_this
+    //      records (because it would be worthless to do so!). But then how do
+    //      I do this test??
     assert(memcmp(wr_tagblock->data, wr_tagblock2.data, wr_tagblock2.size)==0);
 
     wr_free(&wr);
@@ -1506,14 +1495,19 @@ int do_test_write_minimal(int argc, char **argv) {
     return 0;
 }
 
-struct command { const char *s; int (*func)(int, char **); const char *help; };
+struct command {
+    const char *s;
+    int (*func)(int, char **);
+    const char *help;
+};
 struct command all_commands[] = {
-    { "help", do_help,                              "help [command]: List available commands; show help for a command." },
-    { "test_list_tags", do_test_list_tags,          "test_list_tags: List all tagblocks." },
-    { "test_worldrep", do_test_worldrep,            "test_worldrep: Test reading and writing (to memory) the worldrep." },
-    { "test_write_minimal", do_test_write_minimal,  "test_write_minimal: Test writing a minimal dbfile." },
-    { "merge", do_merge,                            "merge file1.mis file2.mis: Merge two worldreps." },
-    { "dump_bsp", do_dump_bsp,                      "dump_bsp file.mis: dump the BSP tree." },
+    { "help", do_help,                              " [command]\tList available commands; show help for a command." },
+    { "tag_list", do_tag_list,                      " file.mis\tList all tagblocks." },
+    { "tag_dump", do_tag_dump,                      " file.mis tag\tDump tagblock to file." },
+    { "test_worldrep", do_test_worldrep,            " file.mis\tTest reading and writing (to memory) the worldrep." },
+    { "test_write_minimal", do_test_write_minimal,  " input.mis\tTest writing a minimal dbfile." },
+    { "merge", do_merge,                            " file1.mis file2.mis\tMerge two worldreps." },
+    { "dump_bsp", do_dump_bsp,                      " file.mis\tdump the BSP tree." },
     { NULL, NULL },
 };
 
@@ -1526,7 +1520,7 @@ int do_help(int argc, char **argv) {
         for (int i=0;; ++i) {
             struct command c = all_commands[i];
             if (! c.s || ! c.func) break;
-            fprintf(stderr, "\t%s\n", c.s);
+            fprintf(stderr, "\t%s %s\n", c.s, c.help);
         }
         return 0;
     } else {
@@ -1544,7 +1538,7 @@ int do_help(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     if (argc<2) {
-        abort_format("Usage: %s command ...", argv[0]);
+        abort_format("Usage: %s command ...\nUse 'help' to see all commands.\n", argv[0]);
     }
     for (int i=0;; ++i) {
         struct command c = all_commands[i];
