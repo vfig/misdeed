@@ -1,4 +1,6 @@
 # MSVC junk:
+*.sln
+*.dll
 *.exe
 *.ilk
 *.obj
