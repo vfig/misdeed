@@ -1326,11 +1326,23 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
     // LGWRAnimlightToCell *animlight_to_cell_array;
 
+    OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
+          maybe dromed (old dromed at least) needs it for rendering in
+          the editor viewport?
+    merge_ext4_out **crashes** in ND dromed the moment the viewport moves into
+    the world. so something is quite fucked.
+
+    but, well, its not the only thing that is quite fucked: game mode crashes
+    on some of these merged .mis (even without only minimal tagblocks) when
+    leaving the void too. so...
+
+    i just dont know where to start on tackling this :(
+
     // TODO: for starters, just leave all these NULL (and dont copy BRLIST ?).
     //       later, maybe, *maaaaybe*, try to fix these up too?
     // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
     // int32 *csg_brush_plane_count_array;             // number of planes, per brush
-    // LGWRCSGPlane *csg_brush_planes_array;           // all planes
+    // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 
@@ -1577,27 +1589,24 @@ void txlist_merge(TextureList *texs1, TextureList *texs2, TextureList **out_texs
 int do_help(int argc, char **argv);
 
 int do_merge(int argc, char **argv) {
-    if (argc!=2) {
-        abort_message("give me two filenames!");
+    if (argc!=4
+    || strcmp(argv[2], "-o")!=0) {
+        abort_message("give me: in1.mis in2.mis -o out.mis !");
     }
-    // TODO: make out_filename a parameter
-    char *out_filename = "merge_out.mis";
 
     char *in_filename[2];
-    for (int i=0; i<2; ++i) {
+    for (int i=0; i<2; ++i)
         in_filename[i] = argv[i];
-    }
+    char *out_filename = argv[3];
 
     dump("Files:");
-    for (int i=0; i<2; ++i) {
+    for (int i=0; i<2; ++i)
         dump(" \"%s\"", in_filename[i]);
-    }
     dump("\n");
 
     DBFile *dbfile[2];
-    for (int i=0; i<2; ++i) {
+    for (int i=0; i<2; ++i)
         dbfile[i] = dbfile_load(in_filename[i]);
-    }
 
     DBFile *dbfile_out = calloc(1, sizeof(DBFile));
     filename_copy_str(&(dbfile_out->filename), out_filename);
@@ -1611,6 +1620,7 @@ int do_merge(int argc, char **argv) {
         || tag_name_eq_str(src_tagblock->key, TAG_WREXT))
             continue;
 
+#if 0
         // TEMP: okay, we are failing badly right now, even in the simple test
         //       case! rendering is fucked and we fall through the world with
         //       no physics. in case this has anything to do with other tagblocks
@@ -1619,6 +1629,7 @@ int do_merge(int argc, char **argv) {
         if (! tag_name_eq_str(src_tagblock->key, "FILE_TYPE")
         && ! tag_name_eq_str(src_tagblock->key, "GAM_FILE"))
             continue;
+#endif
 
         DBTagBlock dest_tagblock = {0};
         dbtagblock_copy(&dest_tagblock, src_tagblock);
@@ -1932,7 +1943,7 @@ struct command all_commands[] = {
     { "tex_list", do_tex_list,                      "file.mis",             "List all textures." },
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
-    { "merge", do_merge,                            "file1.mis file2.mis",  "Merge two worldreps." },
+    { "merge", do_merge,                            "file1.mis file2.mis -o out.mis",  "Merge two worldreps." },
     { "dump_bsp", do_dump_bsp,                      "file.mis",             "dump the BSP tree." },
     { NULL, NULL },
 };
