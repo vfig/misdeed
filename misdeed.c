@@ -418,14 +418,18 @@ typedef struct DBFile {
     DBTagBlock *tagblock_hash;
 } DBFile;
 
+static DBTagBlockName tag_name_from_str(const char *src) {
+    static DBTagBlockName dest;
+    strncpy(dest.s, src, (sizeof dest.s)/(sizeof dest.s[0]));
+    return dest;
+}
+
 static int tag_name_eq(DBTagBlockName name0, DBTagBlockName name1) {
     return (memcmp(&name0, &name1, sizeof(DBTagBlockName))==0);
 }
 
-static DBTagBlockName tag_name_from_str(const char *src) {
-    DBTagBlockName dest;
-    strncpy(dest.s, src, (sizeof dest.s)/(sizeof dest.s[0]));
-    return dest;
+static int tag_name_eq_str(DBTagBlockName name0, const char *name1) {
+    return tag_name_eq(name0, tag_name_from_str(name1));
 }
 
 static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
@@ -1576,28 +1580,64 @@ int do_merge(int argc, char **argv) {
     if (argc!=2) {
         abort_message("give me two filenames!");
     }
+    // TODO: make out_filename a parameter
+    char *out_filename = "merge_out.mis";
 
-    char *filename[2];
+    char *in_filename[2];
+    for (int i=0; i<2; ++i) {
+        in_filename[i] = argv[i];
+    }
+
     dump("Files:");
     for (int i=0; i<2; ++i) {
-        filename[i] = argv[i];
-        dump(" \"%s\"", filename[i]);
+        dump(" \"%s\"", in_filename[i]);
     }
     dump("\n");
 
     DBFile *dbfile[2];
     for (int i=0; i<2; ++i) {
-        dbfile[i] = dbfile_load(filename[i]);
+        dbfile[i] = dbfile_load(in_filename[i]);
     }
 
+    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
+    filename_copy_str(&(dbfile_out->filename), out_filename);
+    dbfile_out->version = (LGDBVersion){ 0, 1 };
+
+    // Copy all tagblocks (except WR*) from the first file into the output.
+    for (int i=0, iend=dbfile_tag_count(dbfile[0]); i<iend; ++i) {
+        DBTagBlock *src_tagblock = dbfile_tag_at_index(dbfile[0], i);
+        if (tag_name_eq_str(src_tagblock->key, TAG_WR)
+        || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
+        || tag_name_eq_str(src_tagblock->key, TAG_WREXT))
+            continue;
+
+        // TEMP: okay, we are failing badly right now, even in the simple test
+        //       case! rendering is fucked and we fall through the world with
+        //       no physics. in case this has anything to do with other tagblocks
+        //       (e.g. mismatched cell ids or something??), lets ignore any
+        //       but the minimums:
+        if (! tag_name_eq_str(src_tagblock->key, "FILE_TYPE")
+        && ! tag_name_eq_str(src_tagblock->key, "GAM_FILE"))
+            continue;
+
+        DBTagBlock dest_tagblock = {0};
+        dbtagblock_copy(&dest_tagblock, src_tagblock);
+        hmputs(dbfile_out->tagblock_hash, dest_tagblock);
+    }
+
+    // Load both worldreps and merge them.
     WorldRep *wr[2];
     for (int i=0; i<2; ++i) {
         DBTagBlock *tagblock = dbfile_get_wr_tagblock(dbfile[i]);
-        dump("%s read ok, 0x%08x bytes of data.\n\n", tagblock->key.s, tagblock->size);
         wr[i] = wr_load_from_tagblock(tagblock);
-        dump("\n");
     }
 
+    // TODO: you know what, *i* dont need txlist merging or family merging!
+    //       i can work from *one* source mission for terrain, and while doing
+    //       terrain portalize vertical slices or single areas. thats fine.
+    //       then i export that into three separate .mis, optimize them, merge
+    //       them, and do object/lighting workflows with the result.
+#if 0
     TextureList *texs[2];
     for (int i=0; i<2; ++i) {
         DBTagBlock *tagblock;
@@ -1678,31 +1718,19 @@ int do_merge(int argc, char **argv) {
     }
     printf("\n");
     abort_message("---- TEMP: stopping here ----");
+#endif
 
-    /// OKAAAAAAAAAAY! now we just need to RUN this shit. watch it CRASH AND BURN
-
+    // TODO: make the split plane a parameter.
     LGWRPortalPlane split_plane;
     split_plane.normal = (LGVector){ 0.0, 0.0, 1.0 };
     split_plane.plane_constant = 0.0;
     WorldRep *merged = wr_merge(wr[0], wr[1], split_plane);
-
-    // it didnt crash yet! save it!
-
-    DBTagBlock file_type;
-    DBTagBlock gam_file;
     DBTagBlock wr_out = {0};
-    dbtagblock_copy(&file_type, dbfile_get_tag(dbfile[0], "FILE_TYPE"));
-    dbtagblock_copy(&gam_file, dbfile_get_tag(dbfile[1], "GAM_FILE"));
     wr_save_to_tagblock(&wr_out, merged, 0);
-    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
-    filename_copy_str(&(dbfile_out->filename), "merge_out.mis");
-    dbfile_out->version = (LGDBVersion){ 0, 1 };
-    hmputs(dbfile_out->tagblock_hash, file_type);
-    hmputs(dbfile_out->tagblock_hash, gam_file);
+
     hmputs(dbfile_out->tagblock_hash, wr_out);
-    const char *filename_out = "e:/dev/thief/T2FM/test_misdeed/merge_out.mis";
-    dbfile_save(dbfile_out, filename_out);
-    dump("Wrote: \"%s\"\n", filename_out);
+    dbfile_save(dbfile_out, out_filename);
+    dump("Wrote: \"%s\"\n", out_filename);
 
     // and clean up maybe?
 
