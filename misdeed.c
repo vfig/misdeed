@@ -210,10 +210,10 @@ typedef struct LGWRCellHeader {
 typedef struct LGWRPoly {
     uint8 flags;
     uint8 num_vertices;
-    uint8 planeid;
-    uint8 clut_id;
-    uint16 destination;
-    uint8 motion_index;
+    uint8 planeid;       // index into cell's planes
+    uint8 clut_id;       // TODO: maybe fixup this too?
+    uint16 destination;  // BUG: I AM NOT FIXUPING THIS!
+    uint8 motion_index;  // TODO: maybe fixup this too?
     uint8 padding;
 } LGWRPoly;
 
@@ -1199,8 +1199,22 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     arrsetlen(wr->cell_array, wr_cell_count);
     for (uint32 i=0, j=wr1_cell_start; i<wr1_cell_count; ++i, ++j)
         wr_copy_cell(&wr->cell_array[j], &wr1->cell_array[i]);
-    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j)
+    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j) {
         wr_copy_cell(&wr->cell_array[j], &wr2->cell_array[i]);
+        // Fixup destination cell ids for portals in this cell.
+        uint16 cell_fixup = (uint16)wr1_cell_count;
+        WorldRepCell *cell = &wr->cell_array[j];
+        for (uint32 p=(cell->header.num_polys-cell->header.num_portal_polys),
+                    pend=cell->header.num_polys;
+                    p<pend; ++p)
+        {
+            printf("## fixup wr2 cell %u (out %u) poly %u destination %u",
+                i, j, p, (unsigned int)(cell->poly_array[p].destination));
+            cell->poly_array[p].destination += cell_fixup;
+            printf(" -> %u\n",
+                (unsigned int)(cell->poly_array[p].destination));
+        }
+    }
 
     // BSP extra planes can be copied en masse, but we add our split planes in at the beginning.
     uint32 split_plane_count = 1;
@@ -1326,6 +1340,8 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
     // LGWRAnimlightToCell *animlight_to_cell_array;
 
+#if FOO_FOO_FOO
+    /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
           maybe dromed (old dromed at least) needs it for rendering in
           the editor viewport?
@@ -1337,6 +1353,8 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     leaving the void too. so...
 
     i just dont know where to start on tackling this :(
+    */
+#endif
 
     // TODO: for starters, just leave all these NULL (and dont copy BRLIST ?).
     //       later, maybe, *maaaaybe*, try to fix these up too?
@@ -1854,6 +1872,36 @@ void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
     }
 }
 
+void dump_bsp_graphviz(LGWRBSPNode *node_array, FILE *f) {
+    fprintf(f, "digraph BSP {\n");
+    fprintf(f, "  node [shape=record];\n");
+    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
+        LGWRBSPNode *node = &node_array[i];
+        if (BSP_IS_LEAF(node)) {
+            fprintf(f, "  node_%u [label=\"{LEAF %u|cell %u}\"];\n",
+                i, i, node->cell_id);
+        } else {
+            fprintf(f, "  node_%u [label=\"{node %u|{", i, i);
+            if (node->inside_index==BSP_INVALID)
+                fprintf(f, "--");
+            else
+                fprintf(f, "<in>in %u", node->inside_index);
+            fprintf(f, "|");
+            if (node->outside_index==BSP_INVALID)
+                fprintf(f, "--");
+            else
+                fprintf(f, "<out>out %u", node->outside_index);
+            fprintf(f, "}}\"];\n");
+
+            if (node->inside_index!=BSP_INVALID)
+                fprintf(f, "  node_%u:in -> node_%u;\n", i, node->inside_index);
+            if (node->outside_index!=BSP_INVALID)
+                fprintf(f, "  node_%u:out -> node_%u;\n", i, node->outside_index);
+        }
+    }
+    fprintf(f, "}\n");
+}
+
 int do_dump_bsp(int argc, char **argv) {
     if (argc!=1) {
         abort_message("give me a filename!");
@@ -1868,6 +1916,7 @@ int do_dump_bsp(int argc, char **argv) {
     dump("\n");
 
     dump_bsp_node_recursive(wr->bsp_node_array, 0);
+    dump_bsp_graphviz(wr->bsp_node_array, stdout);
 
     wr_free(&wr);
     dbfile = dbfile_free(dbfile);
