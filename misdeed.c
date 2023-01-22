@@ -1909,6 +1909,11 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
                     float dot = pos.x*plane.normal.x
                               + pos.y*plane.normal.y
                               + pos.z*plane.normal.z;
+                    // TODO: this logic is fucked ofc! reversing the plane
+                    //       reverses BOTH the normal and distance
+                    //       (so it stays in the same world position).
+                    // AND "not inside" reverses the sense of the test, not
+                    //     negates the dot product. UGH me.
                     if (BSP_GET_FLAGS(node)&kIsReversed)
                         dot = -dot;
                     if (!inside)
@@ -1977,7 +1982,44 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
     fprintf(f, "}\n");
 }
 
+LGVector vadd(LGVector a, LGVector b) {
+    LGVector o;
+    o.x = a.x+b.x;
+    o.y = a.y+b.y;
+    o.z = a.z+b.z;
+    return o;
+}
+
+LGVector vneg(LGVector a) {
+    LGVector o;
+    o.x = -a.x;
+    o.y = -a.y;
+    o.z = -a.z;
+    return o;
+}
+
+LGVector vmulf(LGVector a, float b) {
+    LGVector o;
+    o.x = a.x*b;
+    o.y = a.y*b;
+    o.z = a.z*b;
+    return o;
+}
+
+float vdot(LGVector a, LGVector b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+LGVector vcross(LGVector a, LGVector b) {
+    LGVector o;
+    o.x = a.y*b.z - a.z*b.y;
+    o.y = a.z*b.x - a.x*b.z;
+    o.z = a.x*b.y - a.y*b.x;
+    return o;
+}
+
 void dump_worldrep_obj(WorldRep *wr, FILE *f) {
+    fprintf(f, "mtllib wr.mtl\n");
     for (uint32 c=0, cend=(uint32)arrlenu(wr->cell_array); c<cend; ++c) {
         fprintf(f, "o cell.%05u\n", c);
         WorldRepCell *cell = &wr->cell_array[c];
@@ -1990,6 +2032,10 @@ void dump_worldrep_obj(WorldRep *wr, FILE *f) {
         int32 vcount = (int32)arrlen(cell->vertex_array);
         for (uint32 p=0, pend=(uint32)arrlenu(cell->poly_array); p<pend; ++p) {
             fprintf(f, "# poly %u\n", p);
+            int is_render = (p<cell->header.num_render_polys);
+            int is_portal = (p>=((uint32)cell->header.num_polys-(uint32)cell->header.num_portal_polys));
+            char *mtl = is_portal? (is_render? "water" : "portal") : "rpoly";
+            fprintf(f, "usemtl %s\n", mtl);
             fprintf(f, "f ");
             LGWRPoly *poly = &cell->poly_array[p];
             for (uint32 i=istart, iend=istart+poly->num_vertices; i<iend; ++i) {
@@ -2002,122 +2048,48 @@ void dump_worldrep_obj(WorldRep *wr, FILE *f) {
         fprintf(f, "\n");
     }
 
-#if 0
-    LGVector *vertex_array;
-    LGWRPoly *poly_array;
-    LGWRRenderPoly *renderpoly_array;          // only if !is_ext
-    LGWREXTRenderPoly *renderpoly_ext_array;   // only if is_ext
-        ...
-    }
-
-    fprintf(f, "digraph BSP {\n");
-    fprintf(f, "  node [shape=record];\n");
     LGWRBSPNode *node_array = wr->bsp_node_array;
-    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
-        LGWRBSPNode *node = &node_array[i];
-
-        // Top row: node or leaf and id.
-
-        if (BSP_IS_LEAF(node)) {
-            fprintf(f, "  node_%u [label=\"{{LEAF %u|cell %u}",
-                i, i, node->cell_id);
+    LGVector world_up = { 0.0, 0.0, 1.0 };
+    LGVector world_forward = { 0.0, 1.0, 0.0 };
+    for (uint32 n=0, nend=(uint32)arrlenu(node_array); n<nend; ++n) {
+        LGWRBSPNode *node = &node_array[n];
+        if (BSP_IS_LEAF(node))
+            continue;
+        fprintf(f, "o node.%05u\n", n);
+        fprintf(f, "usemtl plane\n");
+        LGWRPlane plane;
+        if (node->plane_cell_id==-1) {
+            plane = wr->bsp_extraplane_array[node->plane_id];
         } else {
-            fprintf(f, "  node_%u [label=\"{{node %u}", i, i);
+            plane = wr->cell_array[node->plane_cell_id].plane_array[node->plane_id];
         }
-
-        // Middle row: plane and flags
-
-        if (BSP_IS_LEAF(node)) {
-            assert(node->plane_cell_id==-1);
-            assert(node->plane_id==-1);
-
-            // Test this cell's vertexes against all its parents
-            int clipped_away = 0;
-            float EPSILON = 0.001f;
-            WorldRepCell *cell = &wr->cell_array[node->cell_id];
-            for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
-                LGVector pos = cell->vertex_array[v];
-                LGWRPlane plane = {0};
-                uint32 n = BSP_GET_PARENT(node);
-                uint32 pn = i;
-                while (n!=BSP_INVALID) {
-                    LGWRBSPNode *parent = &node_array[n];
-                    int inside = (parent->inside_index==pn);
-                    if (parent->plane_cell_id==-1) {
-                        plane = wr->bsp_extraplane_array[parent->plane_id];
-                    } else {
-                        plane = wr->cell_array[parent->plane_cell_id].plane_array[parent->plane_id];
-                    }
-                    float dot = pos.x*plane.normal.x
-                              + pos.y*plane.normal.y
-                              + pos.z*plane.normal.z;
-                    if (BSP_GET_FLAGS(node)&kIsReversed)
-                        dot = -dot;
-                    if (!inside)
-                        dot = -dot;
-                    char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
-                    if (dot>(plane.distance+EPSILON)) {
-                        fprintf(stderr, "cell %u vertex %u"
-                                " (%0.3f,%0.3f,%0.3f) clipped away"
-                                " by node %u plane (%0.3f,%0.3f,%0.3f) d %0.3f %s;"
-                                " dot %0.3f!\n",
-                            node->cell_id, v,
-                            pos.x, pos.y, pos.z,
-                            n, plane.normal.x, plane.normal.y, plane.normal.z, plane.distance, rev,
-                            dot);
-                        clipped_away = 1;
-                        break;
-                    }
-                    pn = n;
-                    n = BSP_GET_PARENT(parent);
-                }
-            }
-            if (clipped_away)
-                fprintf(f, "|{----}");
-            else
-                fprintf(f, "|{!!!!}");
+        int rev = ((BSP_GET_FLAGS(node)&kIsReversed)!=0);
+        if (rev) {
+            plane.normal.x = -plane.normal.x;
+            plane.normal.y = -plane.normal.y;
+            plane.normal.z = -plane.normal.z;
+            plane.distance = -plane.distance;
+        }
+        LGVector o = vmulf(plane.normal, -plane.distance);
+        LGVector right, up;
+        if (fabsf(vdot(plane.normal, world_up))>0.999f) {
+            right = vcross(world_forward, plane.normal);
+            up = vcross(right, plane.normal);
         } else {
-            LGWRPlane *plane;
-            if (node->plane_cell_id==-1) {
-                plane = &wr->bsp_extraplane_array[node->plane_id];
-            } else {
-                plane = &wr->cell_array[node->plane_cell_id].plane_array[node->plane_id];
-            }
-            char *extra = (node->plane_cell_id==-1)? "X" : "";
-            char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
-            fprintf(f, "|{%0.2f,%0.2f,%0.2f d %0.2f %s%s}",
-                plane->normal.x,
-                plane->normal.y,
-                plane->normal.z,
-                plane->distance,
-                extra, rev);
+            right = vcross(plane.normal, world_up);
+            up = vcross(right, plane.normal);
         }
-
-        // Bottom row (non-leaf): inside/outside
-
-        if (BSP_IS_LEAF(node)) {
-            fprintf(f, "}\"];\n");
-        } else {
-            fprintf(f, "|{");
-            if (node->inside_index==BSP_INVALID)
-                fprintf(f, "--");
-            else
-                fprintf(f, "<in>in %u", node->inside_index);
-            fprintf(f, "|");
-            if (node->outside_index==BSP_INVALID)
-                fprintf(f, "--");
-            else
-                fprintf(f, "<out>out %u", node->outside_index);
-            fprintf(f, "}}\"];\n");
-
-            if (node->inside_index!=BSP_INVALID)
-                fprintf(f, "  node_%u:in -> node_%u;\n", i, node->inside_index);
-            if (node->outside_index!=BSP_INVALID)
-                fprintf(f, "  node_%u:out -> node_%u;\n", i, node->outside_index);
-        }
+        LGVector v0 = vadd(o, vmulf(vadd(right, up), 3.0));
+        LGVector v1 = vadd(o, vmulf(vadd(vneg(right), up), 3.0));
+        LGVector v2 = vadd(o, vmulf(vadd(vneg(right), vneg(up)), 3.0));
+        LGVector v3 = vadd(o, vmulf(vadd(right, vneg(up)), 3.0));
+        fprintf(f, "v %f %f %f\n", v0.x, v0.y, v0.z);
+        fprintf(f, "v %f %f %f\n", v1.x, v1.y, v1.z);
+        fprintf(f, "v %f %f %f\n", v2.x, v2.y, v2.z);
+        fprintf(f, "v %f %f %f\n", v3.x, v3.y, v3.z);
+        fprintf(f, "f -4 -3 -2 -1\n");
     }
     fprintf(f, "}\n");
-#endif
 }
 
 int do_dump_bsp(int argc, char **argv) {
