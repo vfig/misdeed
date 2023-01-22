@@ -256,11 +256,6 @@ typedef struct LGWRLightMapInfo {
     uint32 anim_light_bitmask;
 } LGWRLightMapInfo;
 
-typedef struct LGWRPortalPlane {
-   LGVector normal;
-   float32 plane_constant;
-} LGWRPortalPlane;
-
 #define BSP_INVALID 0x00FFFFFFUL
 #define BSP_GET_PARENT(node) ((node)->parent_index&0x00FFFFFFUL)
 #define BSP_SET_PARENT(node,new_index) \
@@ -294,7 +289,7 @@ typedef struct LGWRBSPNode {
     };
     int32 plane_cell_id; // if -1, plane_id is an index into extra planes;
                          // otherwise, it is an index into this cell's planes.
-    int32 plane_id;
+    int32 plane_id;      // will be -1 for leaf nodes.
     union {
         struct { // leaf nodes:
             uint32 cell_id;
@@ -629,7 +624,7 @@ typedef struct WorldRep {
     WorldRepLightmapFormat lightmap_format;
     uint32 flags;                               // = LGWREXTHeader.flags
     WorldRepCell *cell_array;
-    LGWRPortalPlane *bsp_extraplane_array;
+    LGWRPlane *bsp_extraplane_array;
     LGWRBSPNode *bsp_node_array;
     uint8 *cell_weatherzones_array;             // only if WREXT
     uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
@@ -1155,12 +1150,12 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     free(buffer);
 }
 
-WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
+WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     // WorldRepFormat format;
     // WorldRepLightmapFormat lightmap_format;
     // uint32 flags;                               // = LGWREXTHeader.flags
     // WorldRepCell *cell_array;
-    // LGWRPortalPlane *bsp_extraplane_array;
+    // LGWRPlane *bsp_extraplane_array;
     // LGWRBSPNode *bsp_node_array;
     // uint8 *cell_weatherzones_array;             // only if WREXT
     // uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
@@ -1243,8 +1238,8 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
     split_node.parent_index = BSP_INVALID;
     split_node.plane_cell_id = -1;
     split_node.plane_id = 0;
-    split_node.inside_index = wr2_bsp_node_start;
-    split_node.outside_index = wr1_bsp_node_start;
+    split_node.inside_index = wr1_bsp_node_start;
+    split_node.outside_index = wr2_bsp_node_start;
     wr->bsp_node_array[0] = split_node;
     for (uint32 i=0, j=wr1_bsp_node_start; i<wr1_bsp_node_count; ++i, ++j)
         wr->bsp_node_array[j] = wr1->bsp_node_array[i];
@@ -1271,15 +1266,15 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPortalPlane split_plane) {
             parent_index += node_fixup;
         }
         BSP_SET_PARENT(node, parent_index);
-        if (node->plane_cell_id==-1) {
-            node->plane_id += extraplane_fixup;
-        } else {
-            node->plane_cell_id += cell_fixup;
-        }
 
         if (BSP_IS_LEAF(node)) {
             node->cell_id += cell_fixup;
         } else {
+            if (node->plane_cell_id==-1) {
+                node->plane_id += extraplane_fixup;
+            } else {
+                node->plane_cell_id += cell_fixup;
+            }
             if (node->inside_index!=BSP_INVALID)
                 node->inside_index += node_fixup;
             if (node->outside_index!=BSP_INVALID)
@@ -1750,9 +1745,9 @@ int do_merge(int argc, char **argv) {
 #endif
 
     // TODO: make the split plane a parameter.
-    LGWRPortalPlane split_plane;
+    LGWRPlane split_plane;
     split_plane.normal = (LGVector){ 0.0, 0.0, 1.0 };
-    split_plane.plane_constant = 0.0;
+    split_plane.distance = 0.0;
     WorldRep *merged = wr_merge(wr[0], wr[1], split_plane);
     DBTagBlock wr_out = {0};
     wr_save_to_tagblock(&wr_out, merged, 0);
@@ -1872,16 +1867,96 @@ void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
     }
 }
 
-void dump_bsp_graphviz(LGWRBSPNode *node_array, FILE *f) {
+void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
     fprintf(f, "digraph BSP {\n");
     fprintf(f, "  node [shape=record];\n");
+    LGWRBSPNode *node_array = wr->bsp_node_array;
     for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
         LGWRBSPNode *node = &node_array[i];
+
+        // Top row: node or leaf and id.
+
         if (BSP_IS_LEAF(node)) {
-            fprintf(f, "  node_%u [label=\"{LEAF %u|cell %u}\"];\n",
+            fprintf(f, "  node_%u [label=\"{{LEAF %u|cell %u}",
                 i, i, node->cell_id);
         } else {
-            fprintf(f, "  node_%u [label=\"{node %u|{", i, i);
+            fprintf(f, "  node_%u [label=\"{{node %u}", i, i);
+        }
+
+        // Middle row: plane and flags
+
+        if (BSP_IS_LEAF(node)) {
+            assert(node->plane_cell_id==-1);
+            assert(node->plane_id==-1);
+
+            // Test this cell's vertexes against all its parents
+            int clipped_away = 0;
+            float EPSILON = 0.001f;
+            WorldRepCell *cell = &wr->cell_array[node->cell_id];
+            for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+                LGVector pos = cell->vertex_array[v];
+                LGWRPlane plane = {0};
+                uint32 n = BSP_GET_PARENT(node);
+                uint32 pn = i;
+                while (n!=BSP_INVALID) {
+                    LGWRBSPNode *parent = &node_array[n];
+                    int inside = (parent->inside_index==pn);
+                    if (parent->plane_cell_id==-1) {
+                        plane = wr->bsp_extraplane_array[parent->plane_id];
+                    } else {
+                        plane = wr->cell_array[parent->plane_cell_id].plane_array[parent->plane_id];
+                    }
+                    float dot = pos.x*plane.normal.x
+                              + pos.y*plane.normal.y
+                              + pos.z*plane.normal.z;
+                    if (BSP_GET_FLAGS(node)&kIsReversed)
+                        dot = -dot;
+                    if (!inside)
+                        dot = -dot;
+                    char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
+                    if (dot>(plane.distance+EPSILON)) {
+                        fprintf(stderr, "cell %u vertex %u"
+                                " (%0.3f,%0.3f,%0.3f) clipped away"
+                                " by node %u plane (%0.3f,%0.3f,%0.3f) d %0.3f %s;"
+                                " dot %0.3f!\n",
+                            node->cell_id, v,
+                            pos.x, pos.y, pos.z,
+                            n, plane.normal.x, plane.normal.y, plane.normal.z, plane.distance, rev,
+                            dot);
+                        clipped_away = 1;
+                        break;
+                    }
+                    pn = n;
+                    n = BSP_GET_PARENT(parent);
+                }
+            }
+            if (clipped_away)
+                fprintf(f, "|{----}");
+            else
+                fprintf(f, "|{!!!!}");
+        } else {
+            LGWRPlane *plane;
+            if (node->plane_cell_id==-1) {
+                plane = &wr->bsp_extraplane_array[node->plane_id];
+            } else {
+                plane = &wr->cell_array[node->plane_cell_id].plane_array[node->plane_id];
+            }
+            char *extra = (node->plane_cell_id==-1)? "X" : "";
+            char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
+            fprintf(f, "|{%0.2f,%0.2f,%0.2f d %0.2f %s%s}",
+                plane->normal.x,
+                plane->normal.y,
+                plane->normal.z,
+                plane->distance,
+                extra, rev);
+        }
+
+        // Bottom row (non-leaf): inside/outside
+
+        if (BSP_IS_LEAF(node)) {
+            fprintf(f, "}\"];\n");
+        } else {
+            fprintf(f, "|{");
             if (node->inside_index==BSP_INVALID)
                 fprintf(f, "--");
             else
@@ -1902,6 +1977,149 @@ void dump_bsp_graphviz(LGWRBSPNode *node_array, FILE *f) {
     fprintf(f, "}\n");
 }
 
+void dump_worldrep_obj(WorldRep *wr, FILE *f) {
+    for (uint32 c=0, cend=(uint32)arrlenu(wr->cell_array); c<cend; ++c) {
+        fprintf(f, "o cell.%05u\n", c);
+        WorldRepCell *cell = &wr->cell_array[c];
+        for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+            LGVector vert = cell->vertex_array[v];
+            fprintf(f, "v %f %f %f\n", vert.x, vert.y, vert.z);
+        }
+
+        uint32 istart=0;
+        int32 vcount = (int32)arrlen(cell->vertex_array);
+        for (uint32 p=0, pend=(uint32)arrlenu(cell->poly_array); p<pend; ++p) {
+            fprintf(f, "# poly %u\n", p);
+            fprintf(f, "f ");
+            LGWRPoly *poly = &cell->poly_array[p];
+            for (uint32 i=istart, iend=istart+poly->num_vertices; i<iend; ++i) {
+                int32 v = (int32)cell->index_array[i];
+                fprintf(f, " %d", (v-vcount));
+            }
+            fprintf(f, "\n");
+            istart += poly->num_vertices;
+        }
+        fprintf(f, "\n");
+    }
+
+#if 0
+    LGVector *vertex_array;
+    LGWRPoly *poly_array;
+    LGWRRenderPoly *renderpoly_array;          // only if !is_ext
+    LGWREXTRenderPoly *renderpoly_ext_array;   // only if is_ext
+        ...
+    }
+
+    fprintf(f, "digraph BSP {\n");
+    fprintf(f, "  node [shape=record];\n");
+    LGWRBSPNode *node_array = wr->bsp_node_array;
+    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
+        LGWRBSPNode *node = &node_array[i];
+
+        // Top row: node or leaf and id.
+
+        if (BSP_IS_LEAF(node)) {
+            fprintf(f, "  node_%u [label=\"{{LEAF %u|cell %u}",
+                i, i, node->cell_id);
+        } else {
+            fprintf(f, "  node_%u [label=\"{{node %u}", i, i);
+        }
+
+        // Middle row: plane and flags
+
+        if (BSP_IS_LEAF(node)) {
+            assert(node->plane_cell_id==-1);
+            assert(node->plane_id==-1);
+
+            // Test this cell's vertexes against all its parents
+            int clipped_away = 0;
+            float EPSILON = 0.001f;
+            WorldRepCell *cell = &wr->cell_array[node->cell_id];
+            for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+                LGVector pos = cell->vertex_array[v];
+                LGWRPlane plane = {0};
+                uint32 n = BSP_GET_PARENT(node);
+                uint32 pn = i;
+                while (n!=BSP_INVALID) {
+                    LGWRBSPNode *parent = &node_array[n];
+                    int inside = (parent->inside_index==pn);
+                    if (parent->plane_cell_id==-1) {
+                        plane = wr->bsp_extraplane_array[parent->plane_id];
+                    } else {
+                        plane = wr->cell_array[parent->plane_cell_id].plane_array[parent->plane_id];
+                    }
+                    float dot = pos.x*plane.normal.x
+                              + pos.y*plane.normal.y
+                              + pos.z*plane.normal.z;
+                    if (BSP_GET_FLAGS(node)&kIsReversed)
+                        dot = -dot;
+                    if (!inside)
+                        dot = -dot;
+                    char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
+                    if (dot>(plane.distance+EPSILON)) {
+                        fprintf(stderr, "cell %u vertex %u"
+                                " (%0.3f,%0.3f,%0.3f) clipped away"
+                                " by node %u plane (%0.3f,%0.3f,%0.3f) d %0.3f %s;"
+                                " dot %0.3f!\n",
+                            node->cell_id, v,
+                            pos.x, pos.y, pos.z,
+                            n, plane.normal.x, plane.normal.y, plane.normal.z, plane.distance, rev,
+                            dot);
+                        clipped_away = 1;
+                        break;
+                    }
+                    pn = n;
+                    n = BSP_GET_PARENT(parent);
+                }
+            }
+            if (clipped_away)
+                fprintf(f, "|{----}");
+            else
+                fprintf(f, "|{!!!!}");
+        } else {
+            LGWRPlane *plane;
+            if (node->plane_cell_id==-1) {
+                plane = &wr->bsp_extraplane_array[node->plane_id];
+            } else {
+                plane = &wr->cell_array[node->plane_cell_id].plane_array[node->plane_id];
+            }
+            char *extra = (node->plane_cell_id==-1)? "X" : "";
+            char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
+            fprintf(f, "|{%0.2f,%0.2f,%0.2f d %0.2f %s%s}",
+                plane->normal.x,
+                plane->normal.y,
+                plane->normal.z,
+                plane->distance,
+                extra, rev);
+        }
+
+        // Bottom row (non-leaf): inside/outside
+
+        if (BSP_IS_LEAF(node)) {
+            fprintf(f, "}\"];\n");
+        } else {
+            fprintf(f, "|{");
+            if (node->inside_index==BSP_INVALID)
+                fprintf(f, "--");
+            else
+                fprintf(f, "<in>in %u", node->inside_index);
+            fprintf(f, "|");
+            if (node->outside_index==BSP_INVALID)
+                fprintf(f, "--");
+            else
+                fprintf(f, "<out>out %u", node->outside_index);
+            fprintf(f, "}}\"];\n");
+
+            if (node->inside_index!=BSP_INVALID)
+                fprintf(f, "  node_%u:in -> node_%u;\n", i, node->inside_index);
+            if (node->outside_index!=BSP_INVALID)
+                fprintf(f, "  node_%u:out -> node_%u;\n", i, node->outside_index);
+        }
+    }
+    fprintf(f, "}\n");
+#endif
+}
+
 int do_dump_bsp(int argc, char **argv) {
     if (argc!=1) {
         abort_message("give me a filename!");
@@ -1915,12 +2133,33 @@ int do_dump_bsp(int argc, char **argv) {
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
     dump("\n");
 
-    dump_bsp_node_recursive(wr->bsp_node_array, 0);
-    dump_bsp_graphviz(wr->bsp_node_array, stdout);
+    //dump_bsp_node_recursive(wr->bsp_node_array, 0);
+    dump_bsp_graphviz(wr, stdout);
 
     wr_free(&wr);
     dbfile = dbfile_free(dbfile);
     dump("Ok.\n");
+    return 0;
+}
+
+int do_dump_obj(int argc, char **argv) {
+    if (argc!=3
+    || strcmp(argv[1], "-o")!=0) {
+        abort_message("give me: in.mis -o out.obj !");
+    }
+    char *in_filename = argv[0];
+    char *out_filename = argv[2];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
+    WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+
+    FILE *f = fopen(out_filename, "wb");
+    assert(f);
+    dump_worldrep_obj(wr, f);
+    fclose(f);
+
+    wr_free(&wr);
+    dbfile = dbfile_free(dbfile);
     return 0;
 }
 
@@ -1994,6 +2233,7 @@ struct command all_commands[] = {
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "file1.mis file2.mis -o out.mis",  "Merge two worldreps." },
     { "dump_bsp", do_dump_bsp,                      "file.mis",             "dump the BSP tree." },
+    { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to waverfront .OBJ." },
     { NULL, NULL },
 };
 
