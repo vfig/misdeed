@@ -1888,57 +1888,7 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
         if (BSP_IS_LEAF(node)) {
             assert(node->plane_cell_id==-1);
             assert(node->plane_id==-1);
-
-            // Test this cell's vertexes against all its parents
-            int clipped_away = 0;
-            float EPSILON = 0.001f;
-            WorldRepCell *cell = &wr->cell_array[node->cell_id];
-            for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
-                LGVector pos = cell->vertex_array[v];
-                LGWRPlane plane = {0};
-                uint32 n = BSP_GET_PARENT(node);
-                uint32 pn = i;
-                while (n!=BSP_INVALID) {
-                    LGWRBSPNode *parent = &node_array[n];
-                    int inside = (parent->inside_index==pn);
-                    if (parent->plane_cell_id==-1) {
-                        plane = wr->bsp_extraplane_array[parent->plane_id];
-                    } else {
-                        plane = wr->cell_array[parent->plane_cell_id].plane_array[parent->plane_id];
-                    }
-                    float dot = pos.x*plane.normal.x
-                              + pos.y*plane.normal.y
-                              + pos.z*plane.normal.z;
-                    // TODO: this logic is fucked ofc! reversing the plane
-                    //       reverses BOTH the normal and distance
-                    //       (so it stays in the same world position).
-                    // AND "not inside" reverses the sense of the test, not
-                    //     negates the dot product. UGH me.
-                    if (BSP_GET_FLAGS(node)&kIsReversed)
-                        dot = -dot;
-                    if (!inside)
-                        dot = -dot;
-                    char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
-                    if (dot>(plane.distance+EPSILON)) {
-                        fprintf(stderr, "cell %u vertex %u"
-                                " (%0.3f,%0.3f,%0.3f) clipped away"
-                                " by node %u plane (%0.3f,%0.3f,%0.3f) d %0.3f %s;"
-                                " dot %0.3f!\n",
-                            node->cell_id, v,
-                            pos.x, pos.y, pos.z,
-                            n, plane.normal.x, plane.normal.y, plane.normal.z, plane.distance, rev,
-                            dot);
-                        clipped_away = 1;
-                        break;
-                    }
-                    pn = n;
-                    n = BSP_GET_PARENT(parent);
-                }
-            }
-            if (clipped_away)
-                fprintf(f, "|{----}");
-            else
-                fprintf(f, "|{!!!!}");
+            fprintf(f, "|{----}");
         } else {
             LGWRPlane *plane;
             if (node->plane_cell_id==-1) {
@@ -2092,25 +2042,112 @@ void dump_worldrep_obj(WorldRep *wr, FILE *f) {
     fprintf(f, "}\n");
 }
 
-int do_dump_bsp(int argc, char **argv) {
-    if (argc!=1) {
-        abort_message("give me a filename!");
+void bsp_sanity_check(WorldRep *wr) {
+    dump("BSP sanity check.\n");
+    LGWRBSPNode *node_array = wr->bsp_node_array;
+    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
+        LGWRBSPNode *node = &node_array[i];
+
+        if (BSP_IS_LEAF(node)) {
+            assert(node->plane_cell_id==-1);
+            assert(node->plane_id==-1);
+
+            // Test this cell's vertexes against all parent planes.
+            // If a vertex is clipped away, we repeat the loop with
+            // verbose output.
+            int clipped_away = 0;
+            int repeat = 0;
+            for (;;) {
+                float EPSILON = 0.001f; // generous
+                WorldRepCell *cell = &wr->cell_array[node->cell_id];
+                for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+                    if (repeat)
+                        dump("\t!! Vert %u\n", v);
+                    LGVector pos = cell->vertex_array[v];
+                    LGWRPlane plane = {0};
+                    uint32 n = BSP_GET_PARENT(node);
+                    uint32 prevn = i;
+                    while (n!=BSP_INVALID) {
+                        LGWRBSPNode *parent = &node_array[n];
+                        if (parent->plane_cell_id==-1) {
+                            plane = wr->bsp_extraplane_array[parent->plane_id];
+                        } else {
+                            plane = wr->cell_array[parent->plane_cell_id].plane_array[parent->plane_id];
+                        }
+                        // Looks like LGWRPlane is constructed as:
+                        //
+                        //    normal.X + distance == 0
+                        //
+                        // So to test if a vertex is inside it, we must compare:
+                        //
+                        //    normal.vert <=> -distance
+                        //            ==: on the plane
+                        //            > : inside the plane (+ve halfspace)
+                        //            < : outside the plane (-ve halfspace)
+                        float dot = pos.x*plane.normal.x
+                                  + pos.y*plane.normal.y
+                                  + pos.z*plane.normal.z;
+                        int test_inside = (parent->inside_index==prevn);
+                        if (BSP_GET_FLAGS(parent)&kIsReversed)
+                            test_inside = !test_inside;
+                        int pass;
+                        if (test_inside)
+                            pass = (dot+plane.distance >= -EPSILON);
+                        else
+                            pass = (dot+plane.distance <= EPSILON);
+                        if (repeat) {
+                            dump("\tXX dot %f; -d %f; dot+d %f; pass: %d\n",
+                                dot, -plane.distance, dot+plane.distance, pass);
+                        }
+                        char *rev = (BSP_GET_FLAGS(parent)&kIsReversed)? "R" : "";
+                        if (!pass) {
+                            dump("cell %u vertex %u"
+                                    " (%0.3f,%0.3f,%0.3f) clipped away"
+                                    " by node %u plane (%0.3f,%0.3f,%0.3f) d %0.3f %s;"
+                                    " dot %0.3f!\n",
+                                node->cell_id, v,
+                                pos.x, pos.y, pos.z,
+                                n, plane.normal.x, plane.normal.y, plane.normal.z, plane.distance, rev,
+                                dot);
+                            clipped_away = 1;
+                            break;
+                        }
+                        prevn = n;
+                        n = BSP_GET_PARENT(parent);
+                    }
+                }
+
+                if (repeat) {
+                    break;
+                } else if (clipped_away) {
+                    repeat = 1;
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
     }
+}
 
-    char *filename = argv[0];
-    dump("File: \"%s\"\n", filename);
-    DBFile *dbfile = dbfile_load(filename);
+int do_dump_bsp(int argc, char **argv) {
+    if (argc!=3
+    || strcmp(argv[1], "-o")!=0) {
+        abort_message("give me: in.mis -o out.dot !");
+    }
+    char *in_filename = argv[0];
+    char *out_filename = argv[2];
+    DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
-    dump("%s read ok, 0x%08x bytes of data.\n\n", wr_tagblock->key.s, wr_tagblock->size);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
-    dump("\n");
 
-    //dump_bsp_node_recursive(wr->bsp_node_array, 0);
-    dump_bsp_graphviz(wr, stdout);
+    FILE *f = fopen(out_filename, "wb");
+    assert(f);
+    dump_bsp_graphviz(wr, f);
+    fclose(f);
 
     wr_free(&wr);
     dbfile = dbfile_free(dbfile);
-    dump("Ok.\n");
     return 0;
 }
 
@@ -2129,6 +2166,23 @@ int do_dump_obj(int argc, char **argv) {
     assert(f);
     dump_worldrep_obj(wr, f);
     fclose(f);
+
+    wr_free(&wr);
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
+int do_bsp_sanity_check(int argc, char **argv) {
+    if (argc!=1) {
+        abort_message("give me a filename!");
+    }
+
+    char *filename = argv[0];
+    DBFile *dbfile = dbfile_load(filename);
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
+    WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+
+    bsp_sanity_check(wr);
 
     wr_free(&wr);
     dbfile = dbfile_free(dbfile);
@@ -2204,8 +2258,9 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "file1.mis file2.mis -o out.mis",  "Merge two worldreps." },
-    { "dump_bsp", do_dump_bsp,                      "file.mis",             "dump the BSP tree." },
-    { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to waverfront .OBJ." },
+    { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
+    { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
+    { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
     { NULL, NULL },
 };
 

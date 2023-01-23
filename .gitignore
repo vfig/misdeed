@@ -8,5 +8,7 @@
 .vs/
 
 # My junk:
-*.mis
 /clargs
+*.mis
+*.dot
+*.svg
