@@ -1599,12 +1599,20 @@ void txlist_merge(TextureList *texs1, TextureList *texs2, TextureList **out_texs
 
 /** Commands and stuff */
 
-int do_help(int argc, char **argv);
+struct command;
+struct command {
+    const char *s;
+    int (*func)(int, char **, struct command *);
+    const char *args;
+    const char *help;
+};
 
-int do_merge(int argc, char **argv) {
+int do_help(int argc, char **argv, struct command *cmd);
+
+int do_merge(int argc, char **argv, struct command *cmd) {
     if (argc!=4
     || strcmp(argv[2], "-o")!=0) {
-        abort_message("give me: in1.mis in2.mis -o out.mis !");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
 
     char *in_filename[2];
@@ -1767,9 +1775,9 @@ int do_merge(int argc, char **argv) {
     return 0;
 }
 
-int do_fam_list(int argc, char **argv) {
+int do_fam_list(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     DBFile *dbfile = dbfile_load(filename);
@@ -1788,9 +1796,9 @@ int do_fam_list(int argc, char **argv) {
     return 0;
 }
 
-int do_tag_list(int argc, char **argv) {
+int do_tag_list(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     DBFile *dbfile = dbfile_load(filename);
@@ -1803,9 +1811,9 @@ int do_tag_list(int argc, char **argv) {
     return 0;
 }
 
-int do_tag_dump(int argc, char **argv) {
+int do_tag_dump(int argc, char **argv, struct command *cmd) {
     if (argc!=2) {
-        abort_message("give me a filename and a tag name!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     DBFile *dbfile = dbfile_load(filename);
@@ -1832,9 +1840,9 @@ int do_tag_dump(int argc, char **argv) {
     return 0;
 }
 
-int do_tex_list(int argc, char **argv) {
+int do_tex_list(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     DBFile *dbfile = dbfile_load(filename);
@@ -2130,10 +2138,10 @@ void bsp_sanity_check(WorldRep *wr) {
     }
 }
 
-int do_dump_bsp(int argc, char **argv) {
+int do_dump_bsp(int argc, char **argv, struct command *cmd) {
     if (argc!=3
     || strcmp(argv[1], "-o")!=0) {
-        abort_message("give me: in.mis -o out.dot !");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *in_filename = argv[0];
     char *out_filename = argv[2];
@@ -2151,10 +2159,10 @@ int do_dump_bsp(int argc, char **argv) {
     return 0;
 }
 
-int do_dump_obj(int argc, char **argv) {
+int do_dump_obj(int argc, char **argv, struct command *cmd) {
     if (argc!=3
     || strcmp(argv[1], "-o")!=0) {
-        abort_message("give me: in.mis -o out.obj !");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *in_filename = argv[0];
     char *out_filename = argv[2];
@@ -2172,9 +2180,9 @@ int do_dump_obj(int argc, char **argv) {
     return 0;
 }
 
-int do_bsp_sanity_check(int argc, char **argv) {
+int do_bsp_sanity_check(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
 
     char *filename = argv[0];
@@ -2189,9 +2197,9 @@ int do_bsp_sanity_check(int argc, char **argv) {
     return 0;
 }
 
-int do_test_worldrep(int argc, char **argv) {
+int do_test_worldrep(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     dump("File: \"%s\"\n", filename);
@@ -2216,9 +2224,9 @@ int do_test_worldrep(int argc, char **argv) {
     return 0;
 }
 
-int do_test_write_minimal(int argc, char **argv) {
+int do_test_write_minimal(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
-        abort_message("give me a filename!");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     char *filename = argv[0];
     dump("File: \"%s\"\n", filename);
@@ -2243,12 +2251,6 @@ int do_test_write_minimal(int argc, char **argv) {
     return 0;
 }
 
-struct command {
-    const char *s;
-    int (*func)(int, char **);
-    const char *args;
-    const char *help;
-};
 struct command all_commands[] = {
     { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
     { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
@@ -2257,16 +2259,16 @@ struct command all_commands[] = {
     { "tex_list", do_tex_list,                      "file.mis",             "List all textures." },
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
-    { "merge", do_merge,                            "file1.mis file2.mis -o out.mis",  "Merge two worldreps." },
+    { "merge", do_merge,                            "top.mis bottom.mis -o out.mis",  "Merge two worldreps." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
     { NULL, NULL },
 };
 
-int do_help(int argc, char **argv) {
+int do_help(int argc, char **argv, struct command *cmd) {
     if (argc>1) {
-        abort_message("Usage: help [command]");
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
     if (argc==0) {
         fprintf(stderr, "Commands:\n");
@@ -2297,7 +2299,7 @@ int main(int argc, char **argv) {
         struct command c = all_commands[i];
         if (! c.s || ! c.func) break;
         if (strcmp(c.s, argv[1])==0) {
-            return (c.func)(argc-2, &argv[2]);
+            return (c.func)(argc-2, &argv[2], &c);
         }
     }
     abort_format("Unknown command: %s", argv[1]);
