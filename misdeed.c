@@ -1906,12 +1906,13 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
             }
             char *extra = (node->plane_cell_id==-1)? "X" : "";
             char *rev = (BSP_GET_FLAGS(node)&kIsReversed)? "R" : "";
-            fprintf(f, "|{%0.2f,%0.2f,%0.2f d %0.2f %s%s}",
+            char *marked = (BSP_GET_FLAGS(node)&kIsMarked)? "M" : "";
+            fprintf(f, "|{%0.2f,%0.2f,%0.2f d %0.2f %s%s%s}",
                 plane->normal.x,
                 plane->normal.y,
                 plane->normal.z,
                 plane->distance,
-                extra, rev);
+                extra, rev, marked);
         }
 
         // Bottom row (non-leaf): inside/outside
