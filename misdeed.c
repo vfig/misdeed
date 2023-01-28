@@ -1281,6 +1281,25 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
                 node->outside_index += node_fixup;
         }
     }
+    // NOTE: When rendering, setup_bsp() _skips_ clearing the Marked flag for
+    //       a node's subtree if it itself does not have the Marked flag.
+    //       Obviously the Marked flag should be transient and not saved -- and
+    //       yet it *is* saved. And so when we happen to get one of our bsp
+    //       trees to be merged having the Marked flag, but *our new root node
+    //       is not Marked*, this causes the clearing to not happen. And so
+    //       then sort_via_bsp() does the wrong thing, and we end up with a
+    //       crash!
+    //
+    //       We can address this either by unmarking all the nodes we are
+    //       merging, or by marking our new root! Let's do the former: it is
+    //       more sensible, and shouldn't risk hiding any other marking-based
+    //       bugs.
+    for (uint32 i=0; i<wr_bsp_node_count; ++i) {
+        LGWRBSPNode *node = &wr->bsp_node_array[i];
+        uint8 flags = BSP_GET_FLAGS(node);
+        flags &= ~kIsMarked;
+        BSP_SET_FLAGS(node, flags);
+    }
 
     // Cell weatherzones can be copied en masse.
     if (is_wrext) {
