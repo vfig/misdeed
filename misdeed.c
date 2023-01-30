@@ -455,7 +455,6 @@ typedef struct DBTagBlock {
 } DBTagBlock;
 
 typedef struct DBFile {
-    FileName filename;
     LGDBVersion version;
     DBTagBlock *tagblock_hash;
 } DBFile;
@@ -505,7 +504,6 @@ static void dbtagblock_wipe(DBTagBlock *tagblock) {
 
 DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
-    filename_copy_str(&(dbfile->filename), filename);
     FILE *file = fopen(filename, "rb");
     assert(file);
 
@@ -1197,29 +1195,14 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     free(buffer);
 }
 
-WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
-    // WorldRepFormat format;
-    // WorldRepLightmapFormat lightmap_format;
-    // uint32 flags;                               // = LGWREXTHeader.flags
-    // WorldRepCell *cell_array;
-    // LGWRPlane *bsp_extraplane_array;
-    // LGWRBSPNode *bsp_node_array;
-    // uint8 *cell_weatherzones_array;             // only if WREXT
-    // uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
-    // LGWRWhiteLight *static_whitelight_array;    // only if WR
-    // LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
-    // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
-    // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
-    // LGWRAnimlightToCell *animlight_to_cell_array;
-        // // NOTE: csg_brush_index = (brface>>8)
-        // //       face_index = (brface&0xff)
-        // // TODO: does br=faces mean brush_polys? rename it?
-    // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
-    // int32 *csg_brush_plane_count_array;             // number of planes, per brush
-    // LGWRCSGPlane *csg_brush_planes_array;           // all planes
-    // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
-    // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
-
+DBFile *dbfile_merge_worldreps(
+    DBFile *dbfile1,
+    DBFile *dbfile2,
+    LGWRPlane split_plane)
+{
+    // Load both worldreps and merge them.
+    WorldRep *wr1 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile1));
+    WorldRep *wr2 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile2));
 
     assert(wr1->format==wr2->format);
     assert(wr1->lightmap_format.lightmap_bpp==wr2->lightmap_format.lightmap_bpp);
@@ -1395,6 +1378,12 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
     //     wr->xxx_array[j] = wr2->xxx_array[i];
 
+#if MERGE_LIGHTS
+    // TODO: merging lights is viable, and we need to write the AnimLight
+    //       property table regardless. and it would improve lighting times
+    //       probably to light each section independently? but for now
+    //       this is incomplete.
+
     // Merge lights:
     uint32 wr1_static_light_count = wr1->num_static_lights;
     uint32 wr2_static_light_count = wr2->num_static_lights;
@@ -1465,6 +1454,7 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     }
     abort_message("Not finished");
 
+#else // MERGE_LIGHTS
 
     // uint32 num_static_lights;                   // NOTE: num_static_lights+num_dynamic_lights
     // uint32 num_dynamic_lights;                  //       will == arrlen(light_*_array).
@@ -1479,23 +1469,53 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
     // LGWRAnimlightToCell *animlight_to_cell_array;
 
-#if FOO_FOO_FOO
+#endif // MERGE_LIGHTS
+
     /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
           maybe dromed (old dromed at least) needs it for rendering in
           the editor viewport?
     */
-#endif
-
-    // TODO: for starters, just leave all these NULL (and dont copy BRLIST ?).
-    //       later, maybe, *maaaaybe*, try to fix these up too?
     // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
     // int32 *csg_brush_plane_count_array;             // number of planes, per brush
     // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 
-    return wr;
+    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
+    dbfile_out->version = (LGDBVersion){ 0, 1 };
+
+    // Copy all other tagblocks from the first file into the output.
+    for (int i=0, iend=dbfile_tag_count(dbfile1); i<iend; ++i) {
+        DBTagBlock *src_tagblock = dbfile_tag_at_index(dbfile1, i);
+        if (tag_name_eq_str(src_tagblock->key, TAG_WR)
+        || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
+        || tag_name_eq_str(src_tagblock->key, TAG_WREXT)
+/*        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT)*/)
+            continue;
+
+        DBTagBlock dest_tagblock = {0};
+        dbtagblock_copy(&dest_tagblock, src_tagblock);
+        hmputs(dbfile_out->tagblock_hash, dest_tagblock);
+    }
+
+    // Write the merged worldrep to the output.
+    {
+    DBTagBlock tagblock = {0};
+    wr_save_to_tagblock(&tagblock, wr, 0);
+    hmputs(dbfile_out->tagblock_hash, tagblock);
+    }
+
+    /*
+    // Write the merged AnimLight prop to the output.
+    {
+    DBTagBlock tagblock = {0};
+    animlight_save_to_tagblock(&tagblock, animlight, 0);
+    hmputs(dbfile_out->tagblock_hash, tagblock);
+    }
+    */
+
+    return dbfile_out;
 }
 
 /** Family stuff */
@@ -1765,41 +1785,6 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     for (int i=0; i<2; ++i)
         dbfile[i] = dbfile_load(in_filename[i]);
 
-    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
-    filename_copy_str(&(dbfile_out->filename), out_filename);
-    dbfile_out->version = (LGDBVersion){ 0, 1 };
-
-    // Copy all tagblocks (except WR*) from the first file into the output.
-    for (int i=0, iend=dbfile_tag_count(dbfile[0]); i<iend; ++i) {
-        DBTagBlock *src_tagblock = dbfile_tag_at_index(dbfile[0], i);
-        if (tag_name_eq_str(src_tagblock->key, TAG_WR)
-        || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
-        || tag_name_eq_str(src_tagblock->key, TAG_WREXT))
-            continue;
-
-#if 0
-        // TEMP: okay, we are failing badly right now, even in the simple test
-        //       case! rendering is fucked and we fall through the world with
-        //       no physics. in case this has anything to do with other tagblocks
-        //       (e.g. mismatched cell ids or something??), lets ignore any
-        //       but the minimums:
-        if (! tag_name_eq_str(src_tagblock->key, "FILE_TYPE")
-        && ! tag_name_eq_str(src_tagblock->key, "GAM_FILE"))
-            continue;
-#endif
-
-        DBTagBlock dest_tagblock = {0};
-        dbtagblock_copy(&dest_tagblock, src_tagblock);
-        hmputs(dbfile_out->tagblock_hash, dest_tagblock);
-    }
-
-    // Load both worldreps and merge them.
-    WorldRep *wr[2];
-    for (int i=0; i<2; ++i) {
-        DBTagBlock *tagblock = dbfile_get_wr_tagblock(dbfile[i]);
-        wr[i] = wr_load_from_tagblock(tagblock);
-    }
-
     // TODO: you know what, *i* dont need txlist merging or family merging!
     //       i can work from *one* source mission for terrain, and while doing
     //       terrain portalize vertical slices or single areas. thats fine.
@@ -1892,21 +1877,17 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     LGWRPlane split_plane;
     split_plane.normal = (LGVector){ 0.0, 0.0, 1.0 };
     split_plane.distance = 0.0;
-    WorldRep *merged = wr_merge(wr[0], wr[1], split_plane);
-    DBTagBlock wr_out = {0};
-    wr_save_to_tagblock(&wr_out, merged, 0);
 
-    hmputs(dbfile_out->tagblock_hash, wr_out);
+    DBFile *dbfile_out = dbfile_merge_worldreps(dbfile[0], dbfile[1], split_plane);
     dbfile_save(dbfile_out, out_filename);
     dump("Wrote: \"%s\"\n", out_filename);
 
     // and clean up maybe?
 
-    wr_free(&merged);
     for (int i=0; i<2; ++i) {
-        wr_free(&wr[i]);
         dbfile[i] = dbfile_free(dbfile[i]);
     }
+    dbfile_out = dbfile_free(dbfile_out);
     dump("Ok.\n");
     return 0;
 }
@@ -2377,7 +2358,6 @@ int do_test_write_minimal(int argc, char **argv, struct command *cmd) {
     dbtagblock_copy(&file_type, dbfile_get_tag(dbfile, "FILE_TYPE"));
     dbtagblock_copy(&gam_file, dbfile_get_tag(dbfile, "GAM_FILE"));
     DBFile *minimal_dbfile = calloc(1, sizeof(DBFile));
-    filename_copy_str(&(minimal_dbfile->filename), "minimal.mis");
     minimal_dbfile->version = (LGDBVersion){ 0, 1 };
     hmputs(minimal_dbfile->tagblock_hash, file_type);
     hmputs(minimal_dbfile->tagblock_hash, gam_file);
