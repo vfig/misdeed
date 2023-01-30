@@ -22,6 +22,8 @@ typedef uint32_t uint32;
 typedef uint64_t uint64;
 typedef float float32;
 typedef double float64;
+typedef int8_t bool8;
+typedef int32_t bool32;
 
 #undef assert
 
@@ -125,6 +127,7 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 #define TAG_WREXT   "WREXT"
 #define TAG_FAMILY  "FAMILY"
 #define TAG_TXLIST  "TXLIST"
+#define TAG_PROP_ANIMLIGHT "P$AnimLight"
 
 typedef struct LGVector {
     float32 x, y, z;
@@ -374,6 +377,50 @@ typedef struct LGTXLISTItem {
     char name[LGTXLIST_ITEM_NAME_SIZE];
     char pad;
 } LGTXLISTItem;
+
+typedef struct LGPropHeader {
+    int32   id;
+    uint32  size;
+} LGPropHeader;
+
+typedef struct LGBaseLight {
+    float32 brightness;
+    LGVector offset;
+} LGBaseLight;
+
+typedef struct LGAnimLightAnimation {
+    bool32 refresh;
+    // connection to world rep
+    uint16 first_light_to_cell;
+    uint16 num_cells_reached;
+    int16 light_data_index;
+    // control of fluctuation
+    int16 mode;
+    int32 time_rising_ms;
+    int32 time_falling_ms;
+    float32 min_brightness;
+    float32 max_brightness;
+    // current state
+    float32 brightness;
+    bool32 is_rising;
+    int32 countdown_ms;
+    bool32 inactive;
+} LGAnimLightAnimation;
+
+typedef struct LGAnimLight {
+    LGBaseLight base;
+    LGAnimLightAnimation animation;
+    float radius;
+    int32 notify_script_objid;
+    bool32 quad;
+    float32 inner_radius;
+    bool32 is_dynamic;      // New in NewDark
+} LGAnimLight;
+
+typedef struct LGAnimLightProp {
+    LGPropHeader header;
+    LGAnimLight prop;
+} LGAnimLightProp;
 
 #pragma pack(pop)
 
@@ -1183,6 +1230,7 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     wr->format = wr1->format;
     wr->lightmap_format = wr1->lightmap_format;
     wr->flags = wr1->flags;
+    int is_wr = (wr1->format==WorldRepFormatWR);
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
     // Cells must be copied individually (their memory is owned by the worldrep).
@@ -1347,7 +1395,84 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
     //     wr->xxx_array[j] = wr2->xxx_array[i];
 
-    // TODO: for starters, just leave all these NULL too.
+    // Merge lights:
+    uint32 wr1_static_light_count = wr1->num_static_lights;
+    uint32 wr2_static_light_count = wr2->num_static_lights;
+    uint32 wr1_dynamic_light_count = wr1->num_dynamic_lights;
+    uint32 wr2_dynamic_light_count = wr2->num_dynamic_lights;
+    wr->num_static_lights = wr1_static_light_count+wr2_static_light_count;
+    wr->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
+    uint32 wr_total_light_count = wr->num_static_lights+wr->num_dynamic_lights;
+    uint32 wr1_static_light_start = 0;
+    uint32 wr2_static_light_start = wr1_static_light_start+wr1_static_light_count;
+    uint32 wr1_dynamic_light_start = wr2_static_light_start+wr2_static_light_count;
+    uint32 wr2_dynamic_light_start = wr1_dynamic_light_start+wr1_dynamic_light_count;
+    if (is_wr) {
+        assert(wr_total_light_count==( (uint32)arrlenu(wr1->light_white_array)
+                                     + (uint32)arrlenu(wr2->light_white_array) ));
+        arrsetlen(wr->light_white_array, wr_total_light_count);
+        for (uint32 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
+            wr->light_white_array[j] = wr1->light_white_array[i];
+        for (uint32 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
+            wr->light_white_array[j] = wr2->light_white_array[i];
+        for (uint32 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
+            wr->light_white_array[j] = wr1->light_white_array[i];
+        for (uint32 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
+            wr->light_white_array[j] = wr2->light_white_array[i];
+    } else {
+        assert(wr_total_light_count==( (uint32)arrlenu(wr1->light_rgb_array)
+                                     + (uint32)arrlenu(wr2->light_rgb_array) ));
+        arrsetlen(wr->light_rgb_array, wr_total_light_count);
+        for (uint32 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
+            wr->light_rgb_array[j] = wr1->light_rgb_array[i];
+        for (uint32 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
+            wr->light_rgb_array[j] = wr2->light_rgb_array[i];
+        for (uint32 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
+            wr->light_rgb_array[j] = wr1->light_rgb_array[i];
+        for (uint32 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
+            wr->light_rgb_array[j] = wr2->light_rgb_array[i];
+    }
+
+/* TODO: we will need to update the animlight property table too! we really just
+         want to invalidate lighting (otherwise we run into the problem of
+         figuring out which objects are in which wr and uuuuurgh). so we just
+         set every animlight's wr connection as follows:
+
+           .first_light_to_cell = 0;
+           .num_cells_reached = 0;
+           .light_data_index = -1
+*/
+
+    // TODO: fixup light_index_array in each wr1 and wr2 cell (both, because
+    //       static lights come first (at least, i keep it that way for
+    //       consistency!)
+    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j) {
+        abort_message("Not implemented");
+        // Fixup light indexes in this cell.
+        // !!!!! light_index_array !!!!!
+        // uint16 cell_fixup = (uint16)wr1_cell_count;
+        // WorldRepCell *cell = &wr->cell_array[j];
+        // for (uint32 p=(cell->header.num_polys-cell->header.num_portal_polys),
+        //             pend=cell->header.num_polys;
+        //             p<pend; ++p)
+        // {
+        //     printf("## fixup wr2 cell %u (out %u) poly %u destination %u",
+        //         i, j, p, (unsigned int)(cell->poly_array[p].destination));
+        //     cell->poly_array[p].destination += cell_fixup;
+        //     printf(" -> %u\n",
+        //         (unsigned int)(cell->poly_array[p].destination));
+        // }
+    }
+    abort_message("Not finished");
+
+
+    // uint32 num_static_lights;                   // NOTE: num_static_lights+num_dynamic_lights
+    // uint32 num_dynamic_lights;                  //       will == arrlen(light_*_array).
+    // LGWRWhiteLight *light_white_array;          // only if WR
+    // LGWRRGBLight *light_rgb_array;              // only if WRRGB/WREXT
+    // LGWRAnimlightToCell *animlight_to_cell_array;
+
+
     // LGWRWhiteLight *static_whitelight_array;    // only if WR
     // LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
     // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
@@ -1359,14 +1484,6 @@ WorldRep *wr_merge(WorldRep *wr1, WorldRep *wr2, LGWRPlane split_plane) {
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
           maybe dromed (old dromed at least) needs it for rendering in
           the editor viewport?
-    merge_ext4_out **crashes** in ND dromed the moment the viewport moves into
-    the world. so something is quite fucked.
-
-    but, well, its not the only thing that is quite fucked: game mode crashes
-    on some of these merged .mis (even without only minimal tagblocks) when
-    leaving the void too. so...
-
-    i just dont know where to start on tackling this :(
     */
 #endif
 
@@ -2271,6 +2388,53 @@ int do_test_write_minimal(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_animlight(int argc, char **argv, struct command *cmd) {
+    if (argc!=1) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
+    assert_format(tagblock, "No %s tagblock.", TAG_PROP_ANIMLIGHT);
+
+    uint32 count = tagblock->size/sizeof(LGAnimLightProp);
+    char *pread = (char *)tagblock->data;
+    LGAnimLightProp *props = NULL;
+    MEM_READ_ARRAY(props, count, pread);
+    dump("%u animlights:\n", count);
+    for (uint32 i=0; i<count; ++i) {
+        LGAnimLightProp *prop = &props[i];
+        dump("%4u:\n", i);
+        dump("    id: %d\n", prop->header.id);
+        dump("    size: %u\n", prop->header.size);
+        dump("    sizeof(LGAnimLightProp): %u\n", (uint32)sizeof(LGAnimLight));
+        assert(prop->header.size==sizeof(LGAnimLight));
+        LGAnimLight *animlight = &(props[i].prop);
+        LGBaseLight *base = &(animlight->base);
+        LGAnimLightAnimation *animation = &(animlight->animation);
+        dump("    brightness: %f\n", base->brightness);
+        dump("    offset: %f %f %f\n", base->offset.x, base->offset.y, base->offset.z);
+        dump("    refresh: %d\n", animation->refresh);
+        dump("    first_light_to_cell: %u\n", (uint32)animation->first_light_to_cell);
+        dump("    num_cells_reached: %u\n", (uint32)animation->num_cells_reached);
+        dump("    light_data_index: %d\n", (int32)animation->light_data_index);
+        dump("    mode: %d\n", (int32)animation->mode);
+        dump("    time_rising_ms: %d\n", (int32)animation->time_rising_ms);
+        dump("    time_falling_ms: %d\n", (int32)animation->time_falling_ms);
+        dump("    min_brightness: %f\n", (int32)animation->min_brightness);
+        dump("    max_brightness: %f\n", (int32)animation->max_brightness);
+        // remaining fields are runtime state that i dont care about.
+    }
+    arrfree(props);
+
+    // Ensure we have read all the available data:
+    assert(pread==(tagblock->data+tagblock->size));
+
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
+
 struct command all_commands[] = {
     { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
     { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
@@ -2282,6 +2446,7 @@ struct command all_commands[] = {
     { "merge", do_merge,                            "top.mis bottom.mis -o out.mis",  "Merge two worldreps." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
+    { "dump_animlight", do_dump_animlight,          "file.mis",             "dump animlight table to stdout." },
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
     { NULL, NULL },
 };
