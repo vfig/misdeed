@@ -1414,7 +1414,7 @@ DBFile *dbfile_merge_worldreps(
     // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
     //     wr->xxx_array[j] = wr2->xxx_array[i];
 
-#if MERGE_LIGHTS
+
     // TODO: merging lights is viable, and we need to write the AnimLight
     //       property table regardless. and it would improve lighting times
     //       probably to light each section independently? but for now
@@ -1491,22 +1491,6 @@ DBFile *dbfile_merge_worldreps(
     }
     abort_message("Not finished");
 
-#else // MERGE_LIGHTS
-
-    // uint32 num_static_lights;                   // NOTE: num_static_lights+num_dynamic_lights
-    // uint32 num_dynamic_lights;                  //       will == arrlen(light_*_array).
-    // LGWRWhiteLight *light_white_array;          // only if WR
-    // LGWRRGBLight *light_rgb_array;              // only if WRRGB/WREXT
-    // LGWRAnimlightToCell *animlight_to_cell_array;
-
-
-    // LGWRWhiteLight *static_whitelight_array;    // only if WR
-    // LGWRRGBLight *static_rgblight_array;        // only if WRRGB/WREXT
-    // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
-    // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
-    // LGWRAnimlightToCell *animlight_to_cell_array;
-#endif // MERGE_LIGHTS
-
     /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
           maybe dromed (old dromed at least) needs it for rendering in
@@ -1518,10 +1502,7 @@ DBFile *dbfile_merge_worldreps(
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 
-
-#if MERGE_LIGHTS
-    #error Not implemented.
-#else
+/*
     // Copy the AnimLight property from dbfile1.
     LGAnimLightProp *prop_animlight_array = NULL;
     {
@@ -1538,7 +1519,7 @@ DBFile *dbfile_merge_worldreps(
             anim->light_data_index = -1;
         }
     }
-#endif
+*/
 
     // Write the output file.
 
