@@ -473,9 +473,15 @@ static int tag_name_eq_str(DBTagBlockName name0, const char *name1) {
     return tag_name_eq(name0, tag_name_from_str(name1));
 }
 
-static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char *name_str) {
+static DBTagBlock *dbfile_get_tag_nullable(DBFile *dbfile, const char *name_str) {
     DBTagBlockName name = tag_name_from_str(name_str);
     return hmgetp_null(dbfile->tagblock_hash, name);
+}
+
+static DBTagBlock *dbfile_get_tag(DBFile *dbfile, const char * name_str) {
+    DBTagBlock *tagblock = dbfile_get_tag_nullable(dbfile, name_str);
+    assert_format(tagblock, "No %s tagblock.", name_str);
+    return tagblock;
 }
 
 static uint32 dbfile_tag_count(DBFile *dbfile) {
@@ -501,6 +507,37 @@ static void dbtagblock_wipe(DBTagBlock *tagblock) {
     free(tagblock->data);
     tagblock->data = 0;
 }
+
+#define DBTAGBLOCK_READ_ARRAY(array, tagblock) \
+    do { \
+    DBTagBlock *tb = (tagblock); \
+    uint32 item_size = sizeof(array[0]); \
+    assert_format(tb->size%item_size==0, \
+        "%s tagblock size is not a multiple of %u.", tb->key.s, item_size); \
+    uint32 count = tb->size/item_size; \
+    arrsetlen(array, count); \
+    memcpy(array, tb->data, tb->size); \
+    } while(0)
+
+#define DBTAGBLOCK_WRITE_ARRAY(tagblock, array) \
+    do { \
+    DBTagBlock *tb = (tagblock); \
+    dbtagblock_write_array(tb, array, sizeof(array[0]), (uint32)arrlenu(array)); \
+    } while(0)
+
+static void dbtagblock_write_array(
+    DBTagBlock *tagblock,
+    void *array,
+    uint32 item_size,
+    uint32 item_count)
+{
+    assert(tagblock->data==NULL);
+    uint32 size = item_count*item_size;
+    tagblock->size = size;
+    tagblock->data = malloc(size);
+    memcpy(tagblock->data, array, size);
+}
+
 
 DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
@@ -621,9 +658,9 @@ DBFile *dbfile_free(DBFile *dbfile) {
 
 DBTagBlock *dbfile_get_wr_tagblock(DBFile *dbfile) {
     DBTagBlock *tagblock;
-    tagblock = dbfile_get_tag(dbfile, TAG_WREXT);
-    if (! tagblock) tagblock = dbfile_get_tag(dbfile, TAG_WRRGB);
-    if (! tagblock) tagblock = dbfile_get_tag(dbfile, TAG_WR);
+    tagblock = dbfile_get_tag_nullable(dbfile, TAG_WREXT);
+    if (! tagblock) tagblock = dbfile_get_tag_nullable(dbfile, TAG_WRRGB);
+    if (! tagblock) tagblock = dbfile_get_tag_nullable(dbfile, TAG_WR);
     assert_format(tagblock, "No %s/%s/%s tagblock.", TAG_WR, TAG_WRRGB, TAG_WREXT);
     return tagblock;
 }
@@ -1203,7 +1240,6 @@ DBFile *dbfile_merge_worldreps(
     // Load both worldreps and merge them.
     WorldRep *wr1 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile1));
     WorldRep *wr2 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile2));
-
     assert(wr1->format==wr2->format);
     assert(wr1->lightmap_format.lightmap_bpp==wr2->lightmap_format.lightmap_bpp);
     assert(wr1->lightmap_format.lightmap_2x_modulation==wr2->lightmap_format.lightmap_2x_modulation);
@@ -1383,6 +1419,7 @@ DBFile *dbfile_merge_worldreps(
     //       property table regardless. and it would improve lighting times
     //       probably to light each section independently? but for now
     //       this is incomplete.
+    #error Not implemented.
 
     // Merge lights:
     uint32 wr1_static_light_count = wr1->num_static_lights;
@@ -1468,7 +1505,6 @@ DBFile *dbfile_merge_worldreps(
     // LGWRWhiteLight *dynamic_whitelight_array;   // only if WR
     // LGWRRGBLight *dynamic_rgblight_array;       // only if WRRGB/WREXT
     // LGWRAnimlightToCell *animlight_to_cell_array;
-
 #endif // MERGE_LIGHTS
 
     /*
@@ -1482,16 +1518,42 @@ DBFile *dbfile_merge_worldreps(
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 
+
+#if MERGE_LIGHTS
+    #error Not implemented.
+#else
+    // Copy the AnimLight property from dbfile1.
+    LGAnimLightProp *prop_animlight_array = NULL;
+    {
+        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
+        assert(tagblock->version.major==2
+            && tagblock->version.minor==80);
+        DBTAGBLOCK_READ_ARRAY(prop_animlight_array, tagblock);
+
+        // Disconnect all its lights from the worldrep.
+        for (uint32 i=0, iend=(uint32)arrlenu(prop_animlight_array); i<iend; ++i) {
+            LGAnimLightAnimation *anim = &prop_animlight_array[i].prop.animation;
+            anim->first_light_to_cell = 0;
+            anim->num_cells_reached = 0;
+            anim->light_data_index = -1;
+        }
+    }
+#endif
+
+    // Write the output file.
+
     DBFile *dbfile_out = calloc(1, sizeof(DBFile));
     dbfile_out->version = (LGDBVersion){ 0, 1 };
 
     // Copy all other tagblocks from the first file into the output.
     for (int i=0, iend=dbfile_tag_count(dbfile1); i<iend; ++i) {
         DBTagBlock *src_tagblock = dbfile_tag_at_index(dbfile1, i);
+
+        // Skip the tagblocks that we manually merged.
         if (tag_name_eq_str(src_tagblock->key, TAG_WR)
         || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
         || tag_name_eq_str(src_tagblock->key, TAG_WREXT)
-/*        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT)*/)
+        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT))
             continue;
 
         DBTagBlock dest_tagblock = {0};
@@ -1501,19 +1563,21 @@ DBFile *dbfile_merge_worldreps(
 
     // Write the merged worldrep to the output.
     {
-    DBTagBlock tagblock = {0};
-    wr_save_to_tagblock(&tagblock, wr, 0);
-    hmputs(dbfile_out->tagblock_hash, tagblock);
+        DBTagBlock tagblock = {0};
+        wr_save_to_tagblock(&tagblock, wr, 0);
+        hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
-    /*
     // Write the merged AnimLight prop to the output.
     {
-    DBTagBlock tagblock = {0};
-    animlight_save_to_tagblock(&tagblock, animlight, 0);
-    hmputs(dbfile_out->tagblock_hash, tagblock);
+        DBTagBlock tagblock = {0};
+        tagblock.key = tag_name_from_str(TAG_PROP_ANIMLIGHT);
+        tagblock.version.major = 2;
+        tagblock.version.minor = 80;
+
+        DBTAGBLOCK_WRITE_ARRAY(&tagblock, prop_animlight_array);
+        hmputs(dbfile_out->tagblock_hash, tagblock);
     }
-    */
 
     return dbfile_out;
 }
@@ -1795,7 +1859,6 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     for (int i=0; i<2; ++i) {
         DBTagBlock *tagblock;
         tagblock = dbfile_get_tag(dbfile[i], TAG_TXLIST);
-        assert_format(tagblock, "No %s tagblock.", TAG_TXLIST);
         texs[i] = txlist_load_from_tagblock(tagblock);
     }
 
@@ -1834,7 +1897,6 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     for (int i=0; i<2; ++i) {
         DBTagBlock *tagblock;
         tagblock = dbfile_get_tag(dbfile[i], TAG_FAMILY);
-        assert_format(tagblock, "No %s tagblock.", TAG_FAMILY);
         fams[i] = family_load_from_tagblock(tagblock);
     }
 
@@ -1900,7 +1962,6 @@ int do_fam_list(int argc, char **argv, struct command *cmd) {
     DBFile *dbfile = dbfile_load(filename);
 
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_FAMILY);
-    assert_format(tagblock, "No %s tagblock.", TAG_FAMILY);
 
     FamilyList *fams = family_load_from_tagblock(tagblock);
     printf("sky: %s\n", fams->sky_family.name);
@@ -1922,7 +1983,7 @@ int do_tag_list(int argc, char **argv, struct command *cmd) {
 
     for (uint32 i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
         DBTagBlock *tag = dbfile_tag_at_index(dbfile, i);
-        printf("%s\n", tag->key.s);
+        printf("%s\t%u.%u\n", tag->key.s, tag->version.major, tag->version.minor);
     }
     dbfile = dbfile_free(dbfile);
     return 0;
@@ -1937,7 +1998,6 @@ int do_tag_dump(int argc, char **argv, struct command *cmd) {
 
     char *tag = argv[1];
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, tag);
-    assert_format(tagblock, "No %s tagblock.", tag);
     dump("%s version %u.%u: 0x%08x bytes",
         tagblock->key.s,
         tagblock->version.major,
@@ -1964,7 +2024,6 @@ int do_tex_list(int argc, char **argv, struct command *cmd) {
     char *filename = argv[0];
     DBFile *dbfile = dbfile_load(filename);
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_TXLIST);
-    assert_format(tagblock, "No %s tagblock.", TAG_TXLIST);
     TextureList *txlist = txlist_load_from_tagblock(tagblock);
 
     for (uint32 i=0, iend=(uint32)arrlenu(txlist->tex_array); i<iend; ++i) {
@@ -2375,7 +2434,6 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
     char *in_filename = argv[0];
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
-    assert_format(tagblock, "No %s tagblock.", TAG_PROP_ANIMLIGHT);
 
     uint32 count = tagblock->size/sizeof(LGAnimLightProp);
     char *pread = (char *)tagblock->data;
