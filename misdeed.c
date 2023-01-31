@@ -73,7 +73,6 @@ void dump(char *fmt, ...) {
     va_end(args);
 }
 
-#define arrleni32(arr) ((arr) ? (int32)(arrlenu(arr)) : 0L)
 #define arrlenu32(arr) ((arr) ? (uint32)(arrlenu(arr)) : 0UL)
 #define arrsize(arr) ((arr) ? ((uint32)(arrlenu(arr)*sizeof((arr)[0]))) : 0UL)
 
@@ -1213,7 +1212,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
         }
     }
 
-    // WR,WRRGB,WREXT always store 32 additioanl light records for some reason!
+    // WR,WRRGB,WREXT always store 32 additional light records for some reason!
     // In the code they're "light_this", used as a scratchpad for adding up
     // lighting contributions for an object. Kind of a bug that they are written
     // to the worldrep! Zero them.
@@ -1287,8 +1286,8 @@ DBFile *dbfile_merge_worldreps(
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
     // wrm cells := [wr1 cells] [wr2 cells]
-    int16 wr1_cell_count = arrlenu32(wr1->cell_array);
-    int16 wr2_cell_count = arrlenu32(wr2->cell_array);
+    int16 wr1_cell_count = (int16)arrlen(wr1->cell_array);
+    int16 wr2_cell_count = (int16)arrlen(wr2->cell_array);
     assert_message(wr1_cell_count<=32000-wr2_cell_count, "too many cells!");
     int16 wrm_cell_count = wr1_cell_count+wr2_cell_count;
     int16 wr1_cell_start = 0,
@@ -1329,7 +1328,7 @@ DBFile *dbfile_merge_worldreps(
            wr2_bsp_node_end = wr2_bsp_node_start+wr2_bsp_node_count;
     arrsetlen(wrm->bsp_node_array, wrm_bsp_node_count);
     LGWRBSPNode split_node;
-    split_node.parent_index = BSP_INVALID;
+    BSP_SET_PARENT(&split_node, BSP_INVALID);
     split_node.plane_cell_id = -1;
     split_node.plane_id = 0;
     split_node.inside_index = wr1_bsp_node_start;
@@ -1379,13 +1378,15 @@ DBFile *dbfile_merge_worldreps(
         }
         // Fixup node parents.
         LGWRBSPNode *node = &wrm->bsp_node_array[i];
-        uint32 parent_index = BSP_GET_PARENT(node);
-        if (parent_index==BSP_INVALID) {
-            parent_index = 0;
-        } else {
-            parent_index += node_fixup;
+        if (node_fixup) {
+            uint32 parent_index = BSP_GET_PARENT(node);
+            if (parent_index==BSP_INVALID) {
+                parent_index = 0;
+            } else {
+                parent_index += node_fixup;
+            }
+            BSP_SET_PARENT(node, parent_index);
         }
-        BSP_SET_PARENT(node, parent_index);
         // Fixup node cells and planes.
         if (BSP_IS_LEAF(node)) {
             node->cell_id += cell_fixup;
@@ -1416,8 +1417,8 @@ DBFile *dbfile_merge_worldreps(
 
     // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
     if (is_wrext) {
-        int16 wr1_cell_weatherzones_count = arrlenu32(wr1->cell_weatherzones_array);
-        int16 wr2_cell_weatherzones_count = arrlenu32(wr2->cell_weatherzones_array);
+        int16 wr1_cell_weatherzones_count = (int16)arrlen(wr1->cell_weatherzones_array);
+        int16 wr2_cell_weatherzones_count = (int16)arrlen(wr2->cell_weatherzones_array);
         assert(wr1_cell_weatherzones_count==wr1_cell_count);
         assert(wr2_cell_weatherzones_count==wr2_cell_count);
         int16 wrm_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
@@ -1433,8 +1434,8 @@ DBFile *dbfile_merge_worldreps(
     // wrm cell-renderoptions := [wr1 cell-renderoptions] [wr2 cell-renderoptions]
     if (is_wrext
     && wrm->flags&LGWREXTFlagCellRenderOptions) {
-        int16 wr1_cell_renderoptions_count = arrlenu32(wr1->cell_renderoptions_array);
-        int16 wr2_cell_renderoptions_count = arrlenu32(wr2->cell_renderoptions_array);
+        int16 wr1_cell_renderoptions_count = (int16)arrlen(wr1->cell_renderoptions_array);
+        int16 wr2_cell_renderoptions_count = (int16)arrlen(wr2->cell_renderoptions_array);
         assert(wr1_cell_renderoptions_count==wr1_cell_count);
         assert(wr2_cell_renderoptions_count==wr2_cell_count);
         int16 wrm_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
@@ -1459,15 +1460,15 @@ DBFile *dbfile_merge_worldreps(
     // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
     // TODO: are dynamic lights put in the table even if outside the world?
     //       would make sense, right? so concatenatic the dynamic lights might be wrong!
-    int16 wr1_static_light_count = wr1->num_static_lights-1;
-    int16 wr2_static_light_count = wr2->num_static_lights-1;
-    int16 wr1_dynamic_light_count = wr1->num_dynamic_lights;
-    int16 wr2_dynamic_light_count = wr2->num_dynamic_lights;
+    int16 wr1_static_light_count = (int16)wr1->num_static_lights-1;
+    int16 wr2_static_light_count = (int16)wr2->num_static_lights-1;
+    int16 wr1_dynamic_light_count = (int16)wr1->num_dynamic_lights;
+    int16 wr2_dynamic_light_count = (int16)wr2->num_dynamic_lights;
     wrm->num_static_lights = 1+wr1_static_light_count+wr2_static_light_count;
     wrm->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
     assert(wrm->num_static_lights<=768); // TODO: did NewDark raise this limit?
     assert(wrm->num_dynamic_lights<=32);
-    int16 wrm_total_light_count = wrm->num_static_lights+wrm->num_dynamic_lights;
+    int16 wrm_total_light_count = (int16)(wrm->num_static_lights+wrm->num_dynamic_lights);
     int16 wr1_static_light_start = 1,
           wr1_static_light_end = wr1_static_light_start+wr1_static_light_count;
     int16 wr2_static_light_start = wr1_static_light_end,
@@ -1476,8 +1477,8 @@ DBFile *dbfile_merge_worldreps(
           wr1_dynamic_light_end = wr1_dynamic_light_start+wr1_dynamic_light_count;
     int16 wr2_dynamic_light_start = wr1_dynamic_light_end,
           wr2_dynamic_light_end = wr2_dynamic_light_start+wr2_dynamic_light_count;
-    assert(wrm_total_light_count==( arrleni32(wr1->light_array)
-                                  + arrleni32(wr2->light_array)
+    assert(wrm_total_light_count==( (int16)arrlen(wr1->light_array)
+                                  + (int16)arrlen(wr2->light_array)
                                   - 1 ));
     arrsetlen(wrm->light_array, wrm_total_light_count);
     wrm->light_array[0] = wr1->light_array[0];
@@ -1502,12 +1503,8 @@ DBFile *dbfile_merge_worldreps(
     // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
     //     wr->xxx_array[j] = wr2->xxx_array[i];
 
-    aaaaaaargh what the fuck!?!?
-
-
-    // foo
-
-    about cell->animlight_array ??? these are also indices into the light_data table.
+#if 0
+    aaaaaaargh what about cell->animlight_array ??? these are also indices into the light_data table.
     i do NOT want to repeat those if (index<><><><>) a FIFTH TIME!!!
 
     // Fixup light_index_array in each wr1 and wr2 cell.
@@ -1627,6 +1624,7 @@ DBFile *dbfile_merge_worldreps(
             }
         }
     }
+#endif
 
     /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
@@ -1652,7 +1650,7 @@ DBFile *dbfile_merge_worldreps(
         if (tag_name_eq_str(src_tagblock->key, TAG_WR)
         || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
         || tag_name_eq_str(src_tagblock->key, TAG_WREXT)
-        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT))
+/*        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT)*/)
             continue;
 
         DBTagBlock dest_tagblock = {0};
@@ -1663,10 +1661,11 @@ DBFile *dbfile_merge_worldreps(
     // Write the merged worldrep to the output.
     {
         DBTagBlock tagblock = {0};
-        wr_save_to_tagblock(&tagblock, wr, 0);
+        wr_save_to_tagblock(&tagblock, wrm, 0);
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
+#if 0
     // Write the merged AnimLight prop to the output.
     {
         DBTagBlock tagblock = {0};
@@ -1677,6 +1676,7 @@ DBFile *dbfile_merge_worldreps(
         DBTAGBLOCK_WRITE_ARRAY(&tagblock, animlight_out_array);
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
+#endif
 
     return dbfile_out;
 }
@@ -2554,7 +2554,6 @@ int do_dump_wrlight(int argc, char **argv, struct command *cmd) {
         dump("\tinner: %f\n", light->inner);
         dump("\touter: %f\n", light->outer);
         dump("\tradius: %f\n", light->radius);
-        }
     }
     dump("\n");
 
