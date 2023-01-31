@@ -73,6 +73,8 @@ void dump(char *fmt, ...) {
     va_end(args);
 }
 
+#define arrleni32(arr) ((arr) ? (int32)(arrlenu(arr)) : 0L)
+#define arrlenu32(arr) ((arr) ? (uint32)(arrlenu(arr)) : 0UL)
 #define arrsize(arr) ((arr) ? ((uint32)(arrlenu(arr)*sizeof((arr)[0]))) : 0UL)
 
 #define arrcopy(a,b) do{ \
@@ -84,6 +86,14 @@ void dump(char *fmt, ...) {
         arrfree(a); \
         (a) = NULL; \
     } }while(0)
+
+#define arrappend(a,b) do{ \
+    assert(sizeof((a)[0])==sizeof((b)[0])); \
+    size_t sa = arrlenu(a); \
+    size_t sb = arrlenu(b); \
+    arrsetlen((a),sa+sb); \
+    memcpy((a)+sa,(b),sb*sizeof((a)[0])); \
+    }while(0)
 
 #define MEM_ZERO(buf, size) memset(buf, 0, size)
 
@@ -215,7 +225,7 @@ typedef struct LGWRPoly {
     uint8 num_vertices;
     uint8 planeid;       // index into cell's planes
     uint8 clut_id;       // TODO: maybe fixup this too?
-    uint16 destination;  // BUG: I AM NOT FIXUPING THIS!
+    int16 destination;
     uint8 motion_index;  // TODO: maybe fixup this too?
     uint8 padding;
 } LGWRPoly;
@@ -317,17 +327,17 @@ typedef struct LGWRWhiteLight {
 typedef struct LGWRRGBLight {
     LGVector location;
     LGVector direction;
-    LGVector bright; // TODO: ? bright/hue/sat ?
+    LGVector bright; // TODO: ? bright/hue/sat ? r/g/b?
     float inner;
     float outer;
     float radius;
 } LGWRRGBLight;
 
-typedef struct LGWRAnimlightToCell {
+typedef struct LGWRAnimLightToCell {
     uint16 cell_index;
     uint8 pos_in_cell_palette;
     uint8 pad0;
-} LGWRAnimlightToCell;
+} LGWRAnimLightToCell;
 
 typedef struct LGWRCSGPlane {
    float64 a,b,c;   // Normal to the plane
@@ -391,9 +401,9 @@ typedef struct LGBaseLight {
 typedef struct LGAnimLightAnimation {
     bool32 refresh;
     // connection to world rep
-    uint16 first_light_to_cell;
-    uint16 num_cells_reached;
-    int16 light_data_index;
+    int16 lighttocell_start;   // index of first entry in animlight_to_cell_array
+    int16 lighttocell_count;   // count of entires in animlight_to_cell_array
+    int16 light_array_index;    // index of this light in light_white/rgb_array
     // control of fluctuation
     int16 mode;
     int32 time_rising_ms;
@@ -628,9 +638,9 @@ void dbfile_save(DBFile *dbfile, const char *filename) {
 
     uint32 toc_offset = (uint32)ftell(file);
     LGDBTOCHeader toc_header = {0};
-    toc_header.entry_count = (uint32)arrlenu(toc_array);
+    toc_header.entry_count = arrlenu32(toc_array);
     WRITE(toc_header);
-    for (uint32 i=0, iend=(uint32)arrlenu(toc_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(toc_array); i<iend; ++i) {
         WRITE(toc_array[i]);
     }
     arrfree(toc_array);
@@ -676,9 +686,9 @@ typedef struct WorldRepCell {
     LGWREXTRenderPoly *renderpoly_ext_array;   // only if is_ext
     uint8 *index_array;
     LGWRPlane *plane_array;
-    uint16 *animlight_array;
+    int16 *animlight_array;
     LGWRLightMapInfo *lightmapinfo_array;
-    uint16 *light_index_array;
+    int16 *light_index_array;
     uint32 lightmaps_size;
     void *lightmaps;
 } WorldRepCell;
@@ -712,10 +722,11 @@ typedef struct WorldRep {
     uint8 *cell_renderoptions_array;            // only if WREXT.flags & LGWREXTFlagCellRenderOptions
     uint32 num_static_lights;                   // NOTE: num_static_lights+num_dynamic_lights
     uint32 num_dynamic_lights;                  //       will == arrlen(light_*_array).
-    LGWRWhiteLight *light_white_array;          // only if WR
-    LGWRRGBLight *light_rgb_array;              // only if WRRGB/WREXT
+    // NOTE: although WR uses LGWRWhiteLight, for simplicity we convert those
+    //       to/from LGWRRGBLight when reading/writing our WorldRep.
+    LGWRRGBLight *light_array;
 
-    LGWRAnimlightToCell *animlight_to_cell_array;
+    LGWRAnimLightToCell *animlight_to_cell_array;
     // NOTE: csg_brush_index = (brface>>8)
     //       face_index = (brface&0xff)
     // TODO: does br=faces mean brush_polys? rename it?
@@ -783,7 +794,7 @@ uint32 _wr_encode_lightmap_format(WorldRepFormat wr_format, WorldRepLightmapForm
 
 uint32 _wr_calc_cell_alloc_size(WorldRep *wr) {
     uint32 size = 0;
-    for (uint32 c=0, cend=(uint32)arrlenu(wr->cell_array); c<cend; ++c) {
+    for (uint32 c=0, cend=arrlenu32(wr->cell_array); c<cend; ++c) {
         WorldRepCell *cell = &wr->cell_array[c];
         size += 84; // sizeof(PortalCell)
         size += arrsize(cell->vertex_array);
@@ -846,7 +857,7 @@ void *wr_read_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     MEM_READ_ARRAY(cell->animlight_array, header.num_anim_lights, pread);
     MEM_READ_ARRAY(cell->lightmapinfo_array, header.num_render_polys, pread);
     cell->lightmaps_size = 0;
-    for (uint32 i=0, iend=(uint32)arrlenu(cell->lightmapinfo_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(cell->lightmapinfo_array); i<iend; ++i) {
         LGWRLightMapInfo *info = &cell->lightmapinfo_array[i];
         uint32 lightmap_size = info->padded_width*info->height*(lightmap_bpp/8);
         uint32 light_count = 1+bit_count(info->anim_light_bitmask); // 1 base lightmap, plus 1 per animlight
@@ -873,14 +884,14 @@ void *wr_write_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdat
     } else {
         MEM_WRITE_ARRAY(cell->renderpoly_array, pwrite);
     }
-    uint32 index_count = (uint32)arrlenu(cell->index_array);
+    uint32 index_count = arrlenu32(cell->index_array);
     MEM_WRITE(index_count, pwrite);
     MEM_WRITE_ARRAY(cell->index_array, pwrite);
     MEM_WRITE_ARRAY(cell->plane_array, pwrite);
     MEM_WRITE_ARRAY(cell->animlight_array, pwrite);
     MEM_WRITE_ARRAY(cell->lightmapinfo_array, pwrite);
     MEM_WRITE_SIZE(cell->lightmaps, cell->lightmaps_size, pwrite);
-    uint32 num_light_indices = (uint32)arrlenu(cell->light_index_array);
+    uint32 num_light_indices = arrlenu32(cell->light_index_array);
     MEM_WRITE(num_light_indices, pwrite);
     MEM_WRITE_ARRAY(cell->light_index_array, pwrite);
     return pwrite;
@@ -906,7 +917,7 @@ void wr_copy_cell(WorldRepCell *out_cell, WorldRepCell *cell) {
 
 void wr_free(WorldRep **pwr) {
     WorldRep *wr = *pwr;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(wr->cell_array); i<iend; ++i) {
         wr_free_cell(&wr->cell_array[i]);
     }
     arrfree(wr->cell_array);
@@ -914,8 +925,7 @@ void wr_free(WorldRep **pwr) {
     arrfree(wr->bsp_node_array);
     arrfree(wr->cell_weatherzones_array);
     arrfree(wr->cell_renderoptions_array);
-    arrfree(wr->light_white_array);
-    arrfree(wr->light_rgb_array);
+    arrfree(wr->light_array);
     arrfree(wr->animlight_to_cell_array);
     arrfree(wr->csg_brfaces_array);
     arrfree(wr->csg_brush_plane_count_array);
@@ -976,7 +986,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
 
     int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
     arrsetlen(wr->cell_array, header.cell_count);
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(wr->cell_array); i<iend; ++i) {
         pread = wr_read_cell(&wr->cell_array[i], is_wrext, lightmap_bpp, pread);
     }
 
@@ -1007,14 +1017,30 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     //       T2 WRRGB -- but I am not certain.
     uint32 num_extra_light_records = is_wrext? 0 : (768-num_total_lights);
     if (is_wr) {
-        MEM_READ_ARRAY(wr->light_white_array, num_total_lights, pread);
+        LGWRWhiteLight *light_white_array = NULL;
+        MEM_READ_ARRAY(light_white_array, num_total_lights, pread);
         pread += num_extra_light_records*sizeof(LGWRWhiteLight);
+        // Copy white lights into rgb lights:
+        arrsetlen(wr->light_array, num_total_lights);
+        for (uint32 i=0; i<num_total_lights; ++i) {
+            LGWRWhiteLight *wl = &light_white_array[i];
+            LGWRRGBLight *rgbl = &wr->light_array[i];
+            rgbl->location = wl->location;
+            rgbl->direction = wl->direction;
+            rgbl->bright.x = wl->bright;
+            rgbl->bright.y = wl->bright;
+            rgbl->bright.z = wl->bright;
+            rgbl->inner = wl->inner;
+            rgbl->outer = wl->outer;
+            rgbl->radius = wl->radius;
+        }
+        arrfree(light_white_array);
     } else {
-        MEM_READ_ARRAY(wr->light_rgb_array, num_total_lights, pread);
+        MEM_READ_ARRAY(wr->light_array, num_total_lights, pread);
         pread += num_extra_light_records*sizeof(LGWRRGBLight);
     }
 
-    // WR,WRRGB,WREXT always store 32 additioanl light records for some reason!
+    // WR,WRRGB,WREXT always store 32 additional light records for some reason!
     // In the code they're "light_this", used as a scratchpad for adding up
     // lighting contributions for an object. Kind of a bug that they are written
     // to the worldrep! Skip reading them.
@@ -1038,9 +1064,9 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
             uint32 renderpoly_count;
             if (is_wrext) {
-                renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_ext_array);
+                renderpoly_count = arrlenu32(wr->cell_array[i].renderpoly_ext_array);
             } else {
-                renderpoly_count = (uint32)arrlenu(wr->cell_array[i].renderpoly_array);
+                renderpoly_count = arrlenu32(wr->cell_array[i].renderpoly_array);
             }
             csg_brfaces_count += renderpoly_count;
         }
@@ -1052,14 +1078,14 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         dump("csg_brush_count: %lu\n", csg_brush_count);
         MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
         uint32 csg_brush_plane_total_count = 0;
-        for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_plane_count_array); i<iend; ++i) {
+        for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
             csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
         }
         dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
         MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
         MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
         uint32 csg_brush_surfaceref_total_count = 0;
-        for (uint32 i=0, iend=(uint32)arrlenu(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+        for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
             csg_brush_surfaceref_total_count += wr->csg_brush_surfaceref_count_array[i];
         }
         MEM_READ_ARRAY(wr->csg_brush_surfacerefs_array, csg_brush_surfaceref_total_count, pread);
@@ -1124,23 +1150,23 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
 
     LGWRHeader header;
     header.cell_alloc_size = _wr_calc_cell_alloc_size(wr);
-    header.cell_count = (uint32)arrlenu(wr->cell_array);
+    header.cell_count = arrlenu32(wr->cell_array);
     MEM_WRITE(header, pwrite);
 
     dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
     dump("  cell_count: %lu\n", header.cell_count);
 
     int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
-    for (uint32 i=0, iend=(uint32)arrlenu(wr->cell_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(wr->cell_array); i<iend; ++i) {
         pwrite = wr_write_cell(&wr->cell_array[i], is_wrext, lightmap_bpp, pwrite);
     }
 
-    uint32 bsp_extraplane_count = (uint32)arrlenu(wr->bsp_extraplane_array);
+    uint32 bsp_extraplane_count = arrlenu32(wr->bsp_extraplane_array);
     MEM_WRITE(bsp_extraplane_count, pwrite);
     MEM_WRITE_ARRAY(wr->bsp_extraplane_array, pwrite);
     dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
 
-    uint32 bsp_node_count = (uint32)arrlenu(wr->bsp_node_array);
+    uint32 bsp_node_count = arrlenu32(wr->bsp_node_array);
     MEM_WRITE(bsp_node_count, pwrite);
     MEM_WRITE_ARRAY(wr->bsp_node_array, pwrite);
     dump("  bsp_node_count: %lu\n", bsp_node_count);
@@ -1152,12 +1178,7 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
         }
     }
 
-    uint32 num_total_lights;
-    if (is_wr) {
-        num_total_lights = (uint32)arrlenu(wr->light_white_array);
-    } else {
-        num_total_lights = (uint32)arrlenu(wr->light_rgb_array);
-    }
+    uint32 num_total_lights = arrlenu32(wr->light_array);
     assert(wr->num_static_lights+wr->num_dynamic_lights==num_total_lights);
     MEM_WRITE(wr->num_static_lights, pwrite);
     MEM_WRITE(wr->num_dynamic_lights, pwrite);
@@ -1166,13 +1187,26 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     // fewer total lights. Zero the remainder.
     uint32 num_extra_light_records = is_wrext ? 0 : (768-num_total_lights);
     if (is_wr) {
-        MEM_WRITE_ARRAY(wr->light_white_array, pwrite);
+        LGWRWhiteLight *light_white_array = NULL;
+        arrsetlen(light_white_array, num_total_lights);
+        for (uint32 i=0; i<num_total_lights; ++i) {
+            LGWRWhiteLight *wl = &light_white_array[i];
+            LGWRRGBLight *rgbl = &wr->light_array[i];
+            wl->location = rgbl->location;
+            wl->direction = rgbl->direction;
+            wl->bright = rgbl->bright.x;
+            wl->inner = rgbl->inner;
+            wl->outer = rgbl->outer;
+            wl->radius = rgbl->radius;
+        }
+        MEM_WRITE_ARRAY(light_white_array, pwrite);
+        arrfree(light_white_array);
         LGWRWhiteLight dummy = {0};
         for (uint32 i=0, iend=num_extra_light_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
         }
     } else {
-        MEM_WRITE_ARRAY(wr->light_rgb_array, pwrite);
+        MEM_WRITE_ARRAY(wr->light_array, pwrite);
         LGWRRGBLight dummy = {0};
         for (uint32 i=0, iend=num_extra_light_records; i<iend; ++i) {
             MEM_WRITE(dummy, pwrite);
@@ -1196,22 +1230,22 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
         }
     }
 
-    uint32 num_animlight_to_cell = (uint32)arrlenu(wr->animlight_to_cell_array);
+    uint32 num_animlight_to_cell = arrlenu32(wr->animlight_to_cell_array);
     MEM_WRITE(num_animlight_to_cell, pwrite);
     MEM_WRITE_ARRAY(wr->animlight_to_cell_array, pwrite);
 
     if (include_csg) {
-        uint32 csg_cell_count = (uint32)arrlenu(wr->cell_array);
+        uint32 csg_cell_count = arrlenu32(wr->cell_array);
         MEM_WRITE(csg_cell_count, pwrite);
         dump("csg_cell_count: %lu\n", csg_cell_count);
-        uint32 csg_brfaces_count = (uint32)arrlenu(wr->csg_brfaces_array);
+        uint32 csg_brfaces_count = arrlenu32(wr->csg_brfaces_array);
         dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
         MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
-        uint32 csg_brush_count = (uint32)arrlenu(wr->csg_brush_plane_count_array);
+        uint32 csg_brush_count = arrlenu32(wr->csg_brush_plane_count_array);
         MEM_WRITE(csg_brush_count, pwrite);
         dump("csg_brush_count: %lu\n", csg_brush_count);
         MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
-        uint32 csg_brush_plane_total_count = (uint32)arrlenu(wr->csg_brush_planes_array);
+        uint32 csg_brush_plane_total_count = arrlenu32(wr->csg_brush_planes_array);
         dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
         MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
         MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
@@ -1245,87 +1279,106 @@ DBFile *dbfile_merge_worldreps(
     assert(wr1->lightmap_format.lightmap_2x_modulation==wr2->lightmap_format.lightmap_2x_modulation);
     assert(wr1->lightmap_format.lightmap_scale==wr2->lightmap_format.lightmap_scale);
     assert(wr1->flags==wr2->flags);
-    WorldRep *wr = calloc(1, sizeof(WorldRep));
-    wr->format = wr1->format;
-    wr->lightmap_format = wr1->lightmap_format;
-    wr->flags = wr1->flags;
+    WorldRep *wrm = calloc(1, sizeof(WorldRep));
+    wrm->format = wr1->format;
+    wrm->lightmap_format = wr1->lightmap_format;
+    wrm->flags = wr1->flags;
     int is_wr = (wr1->format==WorldRepFormatWR);
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
+    // wrm cells := [wr1 cells] [wr2 cells]
+    int16 wr1_cell_count = arrlenu32(wr1->cell_array);
+    int16 wr2_cell_count = arrlenu32(wr2->cell_array);
+    assert_message(wr1_cell_count<=32000-wr2_cell_count, "too many cells!");
+    int16 wrm_cell_count = wr1_cell_count+wr2_cell_count;
+    int16 wr1_cell_start = 0,
+          wr1_cell_end = wr1_cell_start+wr1_cell_count;
+    int16 wr2_cell_start = wr1_cell_end,
+          wr2_cell_end = wr2_cell_start+wr2_cell_count;
     // Cells must be copied individually (their memory is owned by the worldrep).
-    uint32 wr1_cell_count = (uint32)arrlenu(wr1->cell_array);
-    uint32 wr2_cell_count = (uint32)arrlenu(wr2->cell_array);
-    uint32 wr_cell_count = wr1_cell_count+wr2_cell_count;
-    uint32 wr1_cell_start = 0;
-    uint32 wr2_cell_start = wr1_cell_start+wr1_cell_count;
-    arrsetlen(wr->cell_array, wr_cell_count);
-    for (uint32 i=0, j=wr1_cell_start; i<wr1_cell_count; ++i, ++j)
-        wr_copy_cell(&wr->cell_array[j], &wr1->cell_array[i]);
-    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j) {
-        wr_copy_cell(&wr->cell_array[j], &wr2->cell_array[i]);
-        // Fixup destination cell ids for portals in this cell.
-        uint16 cell_fixup = (uint16)wr1_cell_count;
-        WorldRepCell *cell = &wr->cell_array[j];
-        for (uint32 p=(cell->header.num_polys-cell->header.num_portal_polys),
-                    pend=cell->header.num_polys;
-                    p<pend; ++p)
-        {
-            printf("## fixup wr2 cell %u (out %u) poly %u destination %u",
-                i, j, p, (unsigned int)(cell->poly_array[p].destination));
-            cell->poly_array[p].destination += cell_fixup;
-            printf(" -> %u\n",
-                (unsigned int)(cell->poly_array[p].destination));
-        }
-    }
+    arrsetlen(wrm->cell_array, wrm_cell_count);
+    for (int16 i=0, j=wr1_cell_start; i<wr1_cell_count; ++i, ++j)
+        wr_copy_cell(&wrm->cell_array[j], &wr1->cell_array[i]);
+    for (int16 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j)
+        wr_copy_cell(&wrm->cell_array[j], &wr2->cell_array[i]);
 
-    // BSP extra planes can be copied en masse, but we add our split planes in at the beginning.
+    // wrm bsp extraplanes := [split plane] [wr1 planes] [wr2 planes]
     uint32 split_plane_count = 1;
-    uint32 wr1_bsp_extraplane_count = (uint32)arrlenu(wr1->bsp_extraplane_array);
-    uint32 wr2_bsp_extraplane_count = (uint32)arrlenu(wr2->bsp_extraplane_array);
-    uint32 wr_bsp_extraplane_count = split_plane_count+wr1_bsp_extraplane_count+wr2_bsp_extraplane_count;
-    uint32 wr1_bsp_extraplane_start = split_plane_count;
-    uint32 wr2_bsp_extraplane_start = wr1_bsp_extraplane_start+wr1_bsp_extraplane_count;
-    arrsetlen(wr->bsp_extraplane_array, wr_bsp_extraplane_count);
-    wr->bsp_extraplane_array[0] = split_plane;
+    uint32 wr1_bsp_extraplane_count = arrlenu32(wr1->bsp_extraplane_array);
+    uint32 wr2_bsp_extraplane_count = arrlenu32(wr2->bsp_extraplane_array);
+    uint32 wrm_bsp_extraplane_count = split_plane_count+wr1_bsp_extraplane_count+wr2_bsp_extraplane_count;
+    uint32 wr1_bsp_extraplane_start = split_plane_count,
+           wr1_bsp_extraplane_end = wr1_bsp_extraplane_start+wr1_bsp_extraplane_count;
+    uint32 wr2_bsp_extraplane_start = wr1_bsp_extraplane_end,
+           wr2_bsp_extraplane_end = wr2_bsp_extraplane_start+wr2_bsp_extraplane_count;
+    arrsetlen(wrm->bsp_extraplane_array, wrm_bsp_extraplane_count);
+    wrm->bsp_extraplane_array[0] = split_plane;
     for (uint32 i=0, j=wr1_bsp_extraplane_start; i<wr1_bsp_extraplane_count; ++i, ++j)
-        wr->bsp_extraplane_array[j] = wr1->bsp_extraplane_array[i];
+        wrm->bsp_extraplane_array[j] = wr1->bsp_extraplane_array[i];
     for (uint32 i=0, j=wr2_bsp_extraplane_start; i<wr2_bsp_extraplane_count; ++i, ++j)
-        wr->bsp_extraplane_array[j] = wr2->bsp_extraplane_array[i];
+        wrm->bsp_extraplane_array[j] = wr2->bsp_extraplane_array[i];
 
-    // BSP nodes can be copied en masse, but need indexes fixed up. And we add
-    // our split node in at the beginning.
+    // wrm bsp nodes := [split node] [wr1 nodes] [wr2 nodes]
     uint32 split_node_count = 1;
-    uint32 wr1_bsp_node_count = (uint32)arrlenu(wr1->bsp_node_array);
-    uint32 wr2_bsp_node_count = (uint32)arrlenu(wr2->bsp_node_array);
-    uint32 wr_bsp_node_count = split_node_count+wr1_bsp_node_count+wr2_bsp_node_count;
-    uint32 wr1_bsp_node_start = split_node_count;
-    uint32 wr2_bsp_node_start = wr1_bsp_node_start+wr1_bsp_node_count;
-    arrsetlen(wr->bsp_node_array, wr_bsp_node_count);
+    uint32 wr1_bsp_node_count = arrlenu32(wr1->bsp_node_array);
+    uint32 wr2_bsp_node_count = arrlenu32(wr2->bsp_node_array);
+    uint32 wrm_bsp_node_count = split_node_count+wr1_bsp_node_count+wr2_bsp_node_count;
+    uint32 wr1_bsp_node_start = split_node_count,
+           wr1_bsp_node_end = wr1_bsp_node_start+wr1_bsp_node_count;
+    uint32 wr2_bsp_node_start = wr1_bsp_node_end,
+           wr2_bsp_node_end = wr2_bsp_node_start+wr2_bsp_node_count;
+    arrsetlen(wrm->bsp_node_array, wrm_bsp_node_count);
     LGWRBSPNode split_node;
     split_node.parent_index = BSP_INVALID;
     split_node.plane_cell_id = -1;
     split_node.plane_id = 0;
     split_node.inside_index = wr1_bsp_node_start;
     split_node.outside_index = wr2_bsp_node_start;
-    wr->bsp_node_array[0] = split_node;
+    wrm->bsp_node_array[0] = split_node;
     for (uint32 i=0, j=wr1_bsp_node_start; i<wr1_bsp_node_count; ++i, ++j)
-        wr->bsp_node_array[j] = wr1->bsp_node_array[i];
+        wrm->bsp_node_array[j] = wr1->bsp_node_array[i];
     for (uint32 i=0, j=wr2_bsp_node_start; i<wr2_bsp_node_count; ++i, ++j)
-        wr->bsp_node_array[j] = wr2->bsp_node_array[i];
-    for (uint32 i=wr1_bsp_node_start; i<wr_bsp_node_count; ++i) {
-        LGWRBSPNode *node = &wr->bsp_node_array[i];
+        wrm->bsp_node_array[j] = wr2->bsp_node_array[i];
 
-        uint32 node_fixup, extraplane_fixup, cell_fixup;
-        if (i<wr2_bsp_node_start) {
-            node_fixup = split_node_count;
-            extraplane_fixup = split_plane_count;
-            cell_fixup = 0;
+    // Fixup cells:
+    for (int16 i=0; i<wrm_cell_count; ++i) {
+        int16 cell_fixup;
+        if (i>=wr1_cell_start && i<wr1_cell_end) {
+            cell_fixup = wr1_cell_start;
+        } else if (i>=wr2_cell_start && i<wr2_cell_end) {
+            cell_fixup = wr2_cell_start;
         } else {
-            node_fixup = split_node_count+wr1_bsp_node_count;
-            extraplane_fixup = split_plane_count+wr1_bsp_extraplane_count;
-            cell_fixup = wr1_cell_count;
+            cell_fixup = 0;
         }
+        WorldRepCell *cell = &wrm->cell_array[i];
+        // Fixup portal destinations.
+        uint32 portal_start = cell->header.num_polys-cell->header.num_portal_polys;
+        uint32 portal_end = cell->header.num_polys;
+        for (uint32 p=portal_start; p<portal_end; ++p) {
+            cell->poly_array[p].destination += cell_fixup;
+        }
+    }
 
+    // Fixup bsp nodes:
+    for (uint32 i=0; i<wrm_bsp_node_count; ++i) {
+        int16 cell_fixup;
+        uint32 node_fixup;
+        uint32 extraplane_fixup;
+        if (i>=wr1_bsp_node_start && i<wr1_bsp_node_end) {
+            cell_fixup = wr1_cell_start;
+            node_fixup = wr1_bsp_node_start;
+            extraplane_fixup = wr1_bsp_extraplane_start;
+        } else if (i>=wr2_bsp_node_start && i<wr2_bsp_node_end) {
+            cell_fixup = wr2_cell_start;
+            node_fixup = wr2_bsp_node_start;
+            extraplane_fixup = wr2_bsp_extraplane_start;
+        } else {
+            cell_fixup = 0;
+            node_fixup = 0;
+            extraplane_fixup = 0;
+        }
+        // Fixup node parents.
+        LGWRBSPNode *node = &wrm->bsp_node_array[i];
         uint32 parent_index = BSP_GET_PARENT(node);
         if (parent_index==BSP_INVALID) {
             parent_index = 0;
@@ -1333,7 +1386,7 @@ DBFile *dbfile_merge_worldreps(
             parent_index += node_fixup;
         }
         BSP_SET_PARENT(node, parent_index);
-
+        // Fixup node cells and planes.
         if (BSP_IS_LEAF(node)) {
             node->cell_id += cell_fixup;
         } else {
@@ -1347,64 +1400,99 @@ DBFile *dbfile_merge_worldreps(
             if (node->outside_index!=BSP_INVALID)
                 node->outside_index += node_fixup;
         }
-    }
-    // NOTE: When rendering, setup_bsp() _skips_ clearing the Marked flag for
-    //       a node's subtree if it itself does not have the Marked flag.
-    //       Obviously the Marked flag should be transient and not saved -- and
-    //       yet it *is* saved. And so when we happen to get one of our bsp
-    //       trees to be merged having the Marked flag, but *our new root node
-    //       is not Marked*, this causes the clearing to not happen. And so
-    //       then sort_via_bsp() does the wrong thing, and we end up with a
-    //       crash!
-    //
-    //       We can address this either by unmarking all the nodes we are
-    //       merging, or by marking our new root! Let's do the former: it is
-    //       more sensible, and shouldn't risk hiding any other marking-based
-    //       bugs.
-    for (uint32 i=0; i<wr_bsp_node_count; ++i) {
-        LGWRBSPNode *node = &wr->bsp_node_array[i];
+        // Fix Marked flag.
+        // NOTE: When rendering, setup_bsp() *skips* clearing the Marked flag for
+        //       a node's subtree if it itself does not have the Marked flag.
+        //       Obviously the Marked flag should be transient and not saved -- and
+        //       yet it *is* saved. And so when we happen to get one of our bsp
+        //       trees to be merged having the Marked flag, but *our new root node
+        //       is not Marked*, this causes the clearing to not happen. And so
+        //       then sort_via_bsp() does the wrong thing, and we end up with a
+        //       crash! We address this either by unmarking all the nodes.
         uint8 flags = BSP_GET_FLAGS(node);
         flags &= ~kIsMarked;
         BSP_SET_FLAGS(node, flags);
     }
 
-    // Cell weatherzones can be copied en masse.
+    // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
     if (is_wrext) {
-        uint32 wr1_cell_weatherzones_count = (uint32)arrlenu(wr1->cell_weatherzones_array);
-        uint32 wr2_cell_weatherzones_count = (uint32)arrlenu(wr2->cell_weatherzones_array);
+        int16 wr1_cell_weatherzones_count = arrlenu32(wr1->cell_weatherzones_array);
+        int16 wr2_cell_weatherzones_count = arrlenu32(wr2->cell_weatherzones_array);
         assert(wr1_cell_weatherzones_count==wr1_cell_count);
         assert(wr2_cell_weatherzones_count==wr2_cell_count);
-        uint32 wr_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
-        uint32 wr1_cell_weatherzones_start = 0;
-        uint32 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
-        arrsetlen(wr->cell_weatherzones_array, wr_cell_weatherzones_count);
-        for (uint32 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
-            wr->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
-        for (uint32 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
-            wr->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
+        int16 wrm_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
+        int16 wr1_cell_weatherzones_start = 0;
+        int16 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
+        arrsetlen(wrm->cell_weatherzones_array, wrm_cell_weatherzones_count);
+        for (int16 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
+            wrm->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
+        for (int16 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
+            wrm->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
     }
 
-    // Cell renderoptions can be copied en masse (if present).
-    if (is_wrext) {
-        if (wr->flags&LGWREXTFlagCellRenderOptions) {
-            uint32 wr1_cell_renderoptions_count = (uint32)arrlenu(wr1->cell_renderoptions_array);
-            uint32 wr2_cell_renderoptions_count = (uint32)arrlenu(wr2->cell_renderoptions_array);
-            assert(wr1_cell_renderoptions_count==wr1_cell_count);
-            assert(wr2_cell_renderoptions_count==wr2_cell_count);
-            uint32 wr_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
-            uint32 wr1_cell_renderoptions_start = 0;
-            uint32 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
-            arrsetlen(wr->cell_renderoptions_array, wr_cell_renderoptions_count);
-            for (uint32 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
-                wr->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
-            for (uint32 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
-                wr->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
-        }
+    // wrm cell-renderoptions := [wr1 cell-renderoptions] [wr2 cell-renderoptions]
+    if (is_wrext
+    && wrm->flags&LGWREXTFlagCellRenderOptions) {
+        int16 wr1_cell_renderoptions_count = arrlenu32(wr1->cell_renderoptions_array);
+        int16 wr2_cell_renderoptions_count = arrlenu32(wr2->cell_renderoptions_array);
+        assert(wr1_cell_renderoptions_count==wr1_cell_count);
+        assert(wr2_cell_renderoptions_count==wr2_cell_count);
+        int16 wrm_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
+        int16 wr1_cell_renderoptions_start = 0;
+        int16 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
+        arrsetlen(wrm->cell_renderoptions_array, wrm_cell_renderoptions_count);
+        for (int16 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
+            wrm->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
+        for (int16 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
+            wrm->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
     }
+
+    // wrm lights := [sun]
+    //               [wr1 static lights, except sun]
+    //               [wr2 static lights, except sun]
+    //               [wr1 dynamic lights]
+    //               [wr2 dynamic lights]
+    // NOTE: The first entry in the light table is always present, and reserved
+    //       for sunlight.
+    // NOTE: "static" lights are Renderer>Light and Renderer>AnimLight.
+    //       "dynamic" lights are Renderer>Dynamic Light.
+    // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
+    // TODO: are dynamic lights put in the table even if outside the world?
+    //       would make sense, right? so concatenatic the dynamic lights might be wrong!
+    int16 wr1_static_light_count = wr1->num_static_lights-1;
+    int16 wr2_static_light_count = wr2->num_static_lights-1;
+    int16 wr1_dynamic_light_count = wr1->num_dynamic_lights;
+    int16 wr2_dynamic_light_count = wr2->num_dynamic_lights;
+    wrm->num_static_lights = 1+wr1_static_light_count+wr2_static_light_count;
+    wrm->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
+    assert(wrm->num_static_lights<=768); // TODO: did NewDark raise this limit?
+    assert(wrm->num_dynamic_lights<=32);
+    int16 wrm_total_light_count = wrm->num_static_lights+wrm->num_dynamic_lights;
+    int16 wr1_static_light_start = 1,
+          wr1_static_light_end = wr1_static_light_start+wr1_static_light_count;
+    int16 wr2_static_light_start = wr1_static_light_end,
+          wr2_static_light_end = wr2_static_light_start+wr2_static_light_count;
+    int16 wr1_dynamic_light_start = wr2_static_light_end,
+          wr1_dynamic_light_end = wr1_dynamic_light_start+wr1_dynamic_light_count;
+    int16 wr2_dynamic_light_start = wr1_dynamic_light_end,
+          wr2_dynamic_light_end = wr2_dynamic_light_start+wr2_dynamic_light_count;
+    assert(wrm_total_light_count==( arrleni32(wr1->light_array)
+                                  + arrleni32(wr2->light_array)
+                                  - 1 ));
+    arrsetlen(wrm->light_array, wrm_total_light_count);
+    wrm->light_array[0] = wr1->light_array[0];
+    for (int16 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
+        wrm->light_array[j] = wr1->light_array[1+i];
+    for (int16 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
+        wrm->light_array[j] = wr2->light_array[1+i];
+    for (int16 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
+        wrm->light_array[j] = wr1->light_array[1+wr1_static_light_count+i];
+    for (int16 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
+        wrm->light_array[j] = wr2->light_array[1+wr2_static_light_count+i];
 
     // TEMP: template for the copying of stuff?
-    // uint32 wr1_xxx_count = (uint32)arrlenu(wr1->xxx_array);
-    // uint32 wr2_xxx_count = (uint32)arrlenu(wr2->xxx_array);
+    // uint32 wr1_xxx_count = arrlenu32(wr1->xxx_array);
+    // uint32 wr2_xxx_count = arrlenu32(wr2->xxx_array);
     // uint32 wr_xxx_count = wr1_xxx_count+wr2_xxx_count;
     // uint32 wr1_xxx_start = 0;
     // uint32 wr2_xxx_start = wr1_xxx_start+wr1_xxx_count;
@@ -1414,82 +1502,131 @@ DBFile *dbfile_merge_worldreps(
     // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
     //     wr->xxx_array[j] = wr2->xxx_array[i];
 
+    aaaaaaargh what the fuck!?!?
 
-    // TODO: merging lights is viable, and we need to write the AnimLight
-    //       property table regardless. and it would improve lighting times
-    //       probably to light each section independently? but for now
-    //       this is incomplete.
-    #error Not implemented.
 
-    // Merge lights:
-    uint32 wr1_static_light_count = wr1->num_static_lights;
-    uint32 wr2_static_light_count = wr2->num_static_lights;
-    uint32 wr1_dynamic_light_count = wr1->num_dynamic_lights;
-    uint32 wr2_dynamic_light_count = wr2->num_dynamic_lights;
-    wr->num_static_lights = wr1_static_light_count+wr2_static_light_count;
-    wr->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
-    uint32 wr_total_light_count = wr->num_static_lights+wr->num_dynamic_lights;
-    uint32 wr1_static_light_start = 0;
-    uint32 wr2_static_light_start = wr1_static_light_start+wr1_static_light_count;
-    uint32 wr1_dynamic_light_start = wr2_static_light_start+wr2_static_light_count;
-    uint32 wr2_dynamic_light_start = wr1_dynamic_light_start+wr1_dynamic_light_count;
-    if (is_wr) {
-        assert(wr_total_light_count==( (uint32)arrlenu(wr1->light_white_array)
-                                     + (uint32)arrlenu(wr2->light_white_array) ));
-        arrsetlen(wr->light_white_array, wr_total_light_count);
-        for (uint32 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
-            wr->light_white_array[j] = wr1->light_white_array[i];
-        for (uint32 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
-            wr->light_white_array[j] = wr2->light_white_array[i];
-        for (uint32 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
-            wr->light_white_array[j] = wr1->light_white_array[i];
-        for (uint32 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
-            wr->light_white_array[j] = wr2->light_white_array[i];
-    } else {
-        assert(wr_total_light_count==( (uint32)arrlenu(wr1->light_rgb_array)
-                                     + (uint32)arrlenu(wr2->light_rgb_array) ));
-        arrsetlen(wr->light_rgb_array, wr_total_light_count);
-        for (uint32 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
-            wr->light_rgb_array[j] = wr1->light_rgb_array[i];
-        for (uint32 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
-            wr->light_rgb_array[j] = wr2->light_rgb_array[i];
-        for (uint32 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
-            wr->light_rgb_array[j] = wr1->light_rgb_array[i];
-        for (uint32 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
-            wr->light_rgb_array[j] = wr2->light_rgb_array[i];
+    // foo
+
+    about cell->animlight_array ??? these are also indices into the light_data table.
+    i do NOT want to repeat those if (index<><><><>) a FIFTH TIME!!!
+
+    // Fixup light_index_array in each wr1 and wr2 cell.
+    // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
+    for (uint32 i=wr1_cell_start, iend=wr1_cell_start+wr1_cell_count; i<iend; ++i) {
+        WorldRepCell *cell = &wr->cell_array[i];
+        for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
+            uint16 index = cell->light_index_array[j];
+            if (index==0) {
+                // sunlight index is unchanged.
+            } else if (index<(1+wr1_static_light_count)) {
+                // wr1 static light indexes are unchanged.
+            } else {
+                // wr1 dynamic lights now come after wr2 static lights
+                index += wr2_static_light_count;
+            }
+            cell->light_index_array[j] = index;
+        }
+    }
+    for (uint32 i=wr2_cell_start, iend=wr2_cell_start+wr2_cell_count; i<iend; ++i) {
+        WorldRepCell *cell = &wr->cell_array[i];
+        for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
+            uint16 index = cell->light_index_array[j];
+            if (index==0) {
+                // sunlight index is unchanged.
+            } else if (index<(1+wr2_static_light_count)) {
+                // wr2 static light indexes now come after wr1 static lights
+                index += wr1_static_light_count;
+            } else {
+                // wr2 dynamic lights now come after wr1 static and dynamic lights 
+                index += (wr1_static_light_count+wr1_dynamic_light_count);
+            }
+            cell->light_index_array[j] = index;
+        }
     }
 
-/* TODO: we will need to update the animlight property table too! we really just
-         want to invalidate lighting (otherwise we run into the problem of
-         figuring out which objects are in which wr and uuuuurgh). so we just
-         set every animlight's wr connection as follows:
-
-           .first_light_to_cell = 0;
-           .num_cells_reached = 0;
-           .light_data_index = -1
-*/
-
-    // TODO: fixup light_index_array in each wr1 and wr2 cell (both, because
-    //       static lights come first (at least, i keep it that way for
-    //       consistency!)
-    for (uint32 i=0, j=wr2_cell_start; i<wr2_cell_count; ++i, ++j) {
-        abort_message("Not implemented");
-        // Fixup light indexes in this cell.
-        // !!!!! light_index_array !!!!!
-        // uint16 cell_fixup = (uint16)wr1_cell_count;
-        // WorldRepCell *cell = &wr->cell_array[j];
-        // for (uint32 p=(cell->header.num_polys-cell->header.num_portal_polys),
-        //             pend=cell->header.num_polys;
-        //             p<pend; ++p)
-        // {
-        //     printf("## fixup wr2 cell %u (out %u) poly %u destination %u",
-        //         i, j, p, (unsigned int)(cell->poly_array[p].destination));
-        //     cell->poly_array[p].destination += cell_fixup;
-        //     printf(" -> %u\n",
-        //         (unsigned int)(cell->poly_array[p].destination));
-        // }
+    // Merge animlight_to_cell_arrays:
+    uint32 wr1_animlighttocell_count = arrlenu32(wr1->animlight_to_cell_array);
+    uint32 wr2_animlighttocell_count = arrlenu32(wr2->animlight_to_cell_array);
+    uint32 wr1_animlighttocell_start = 0;
+    uint32 wr2_animlighttocell_start = wr1_animlighttocell_count;
+    uint32 wr_animlighttocell_count = wr1_animlighttocell_count+wr2_animlighttocell_count;
+    arrsetlen(wr->animlight_to_cell_array, wr_animlighttocell_count);
+    {
+        int16 cell_fixup = 0;
+        for (uint32 i=0, j=wr1_animlighttocell_start; i<wr1_animlighttocell_count; ++i, ++j) {
+            wr->animlight_to_cell_array[j] = wr1->animlight_to_cell_array[i];
+            wr->animlight_to_cell_array[j].cell_index += cell_fixup;
+        }
+        cell_fixup = (uint16)wr1_cell_count;
+        for (uint32 i=0, j=wr2_animlighttocell_start; i<wr2_animlighttocell_count; ++i, ++j) {
+            wr->animlight_to_cell_array[j] = wr2->animlight_to_cell_array[i];
+            wr->animlight_to_cell_array[j].cell_index += cell_fixup;
+        }
     }
-    abort_message("Not finished");
+   
+    // Merge and fixup AnimLight propertys.
+    LGAnimLightProp *animlight1_array = NULL;
+    LGAnimLightProp *animlight2_array = NULL;
+    LGAnimLightProp *animlight_out_array = NULL;
+    int16 lighttocell_fixup = wr1_animlighttocell_count;
+    {
+        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
+        assert(tagblock->version.major==2
+            && tagblock->version.minor==80);
+        DBTAGBLOCK_READ_ARRAY(animlight1_array, tagblock);
+        tagblock = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
+        assert(tagblock->version.major==2
+            && tagblock->version.minor==80);
+        DBTAGBLOCK_READ_ARRAY(animlight2_array, tagblock);
+        assert(arrlenu32(animlight1_array)==arrlenu32(animlight2_array));
+        arrsetlen(animlight_out_array, arrlen(animlight1_array));
+
+        for (uint32 i=0, iend=arrlenu32(animlight_out_array); i<iend; ++i) {
+            LGAnimLightAnimation *anim1 = &animlight1_array[i].prop.animation;
+            LGAnimLightAnimation *anim2 = &animlight2_array[i].prop.animation;
+            if (anim1->light_array_index==-1) {
+                if (anim2->light_array_index==-1) {
+                    // This light isnt doing anything! just copy it from 1.
+                    animlight_out_array[i] = animlight1_array[i];
+                } else {
+                    // Copy this light from 2, and fix it up.
+                    animlight_out_array[i] = animlight2_array[i];
+                    LGAnimLightAnimation *anim = &animlight_out_array[i].prop.animation;
+                    anim->lighttocell_start += lighttocell_fixup;
+                    int16 index = anim->light_array_index;
+                    if (index<=0) {
+                        // invalid or sunlight index is unchanged.
+                    } else if (index<(1+wr2_static_light_count)) {
+                        // wr2 static light indexes now come after wr1 static lights
+                        index += wr1_static_light_count;
+                    } else {
+                        // wr2 dynamic lights now come after wr1 static and dynamic lights 
+                        index += (wr1_static_light_count+wr1_dynamic_light_count);
+                    }
+                    anim->light_array_index = index;
+                }
+            } else {
+                if (anim2->light_array_index==-1) {
+                    // Copy this light from 1, and fix it up.
+                    animlight_out_array[i] = animlight2_array[i];
+                    LGAnimLightAnimation *anim = &animlight_out_array[i].prop.animation;
+                    // wr1 lights don't need lighttocell fixups.
+                    int16 index = anim->light_array_index;
+                    if (index<=0) {
+                        // invalid or sunlight index is unchanged.
+                    } else if (index<(1+wr1_static_light_count)) {
+                        // wr1 static light indexes are unchanged.
+                    } else {
+                        // wr1 dynamic lights now come after wr2 static lights
+                        index += wr2_static_light_count;
+                    }
+                    anim->light_array_index = index;
+                } else {
+                    abort_message("animlight in both worldreps is complicated and not supported yet.");
+                }
+            }
+        }
+    }
 
     /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
@@ -1501,25 +1638,6 @@ DBFile *dbfile_merge_worldreps(
     // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
-
-/*
-    // Copy the AnimLight property from dbfile1.
-    LGAnimLightProp *prop_animlight_array = NULL;
-    {
-        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2
-            && tagblock->version.minor==80);
-        DBTAGBLOCK_READ_ARRAY(prop_animlight_array, tagblock);
-
-        // Disconnect all its lights from the worldrep.
-        for (uint32 i=0, iend=(uint32)arrlenu(prop_animlight_array); i<iend; ++i) {
-            LGAnimLightAnimation *anim = &prop_animlight_array[i].prop.animation;
-            anim->first_light_to_cell = 0;
-            anim->num_cells_reached = 0;
-            anim->light_data_index = -1;
-        }
-    }
-*/
 
     // Write the output file.
 
@@ -1556,7 +1674,7 @@ DBFile *dbfile_merge_worldreps(
         tagblock.version.major = 2;
         tagblock.version.minor = 80;
 
-        DBTAGBLOCK_WRITE_ARRAY(&tagblock, prop_animlight_array);
+        DBTAGBLOCK_WRITE_ARRAY(&tagblock, animlight_out_array);
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
@@ -1598,7 +1716,7 @@ FamilyList *family_load_from_tagblock(DBTagBlock *tagblock) {
 void family_save_to_tagblock(DBTagBlock *tagblock, FamilyList *fams) {
     assert(tagblock->data==NULL);
 
-    uint32 count = (uint32)arrlenu(fams->family_array);
+    uint32 count = arrlenu32(fams->family_array);
     assert(count==LGFAMILY_COUNT_MAX_OLDDARK
         || count==LGFAMILY_COUNT_MAX_NEWDARK);
     tagblock->size = sizeof(LGFAMILYHeader) + count*sizeof(LGFAMILYRecord);
@@ -1616,8 +1734,8 @@ void family_save_to_tagblock(DBTagBlock *tagblock, FamilyList *fams) {
 
 void family_merge(FamilyList *fams1, FamilyList *fams2, FamilyList **out_fams, FamilyRemap **out_fams2_remap) {
     assert(fams1->is_newdark==fams2->is_newdark);
-    uint32 fams1_count = (uint32)arrlenu(fams1->family_array);
-    uint32 fams2_count = (uint32)arrlenu(fams2->family_array);
+    uint32 fams1_count = arrlenu32(fams1->family_array);
+    uint32 fams2_count = arrlenu32(fams2->family_array);
     uint32 out_count_max = fams1->is_newdark? LGFAMILY_COUNT_MAX_NEWDARK : LGFAMILY_COUNT_MAX_OLDDARK;
 
     FamilyRemap *lookup = NULL;
@@ -1676,7 +1794,7 @@ void family_merge(FamilyList *fams1, FamilyList *fams2, FamilyList **out_fams, F
     // Fill the rest with nulls
     LGFAMILYRecord null_record = {0};
     strcpy(null_record.name, LGFAMILY_NAME_NULL);
-    for (uint32 i=(uint32)arrlenu(merged->family_array), iend=out_count_max; i<iend; ++i) {
+    for (uint32 i=arrlenu32(merged->family_array), iend=out_count_max; i<iend; ++i) {
         merged->family_array[i] = null_record;
     }
 
@@ -1746,8 +1864,8 @@ void txlist_merge(TextureList *texs1, TextureList *texs2, TextureList **out_texs
     TextureRecord null_record = {0};
     strcpy(null_record.name, LGTXLIST_NAME_NULL);
 
-    uint32 texs1_count = (uint32)arrlenu(texs1->tex_array);
-    uint32 texs2_count = (uint32)arrlenu(texs2->tex_array);
+    uint32 texs1_count = arrlenu32(texs1->tex_array);
+    uint32 texs2_count = arrlenu32(texs2->tex_array);
 
     // Copy in texs1
     uint32 texs2_start = 1;
@@ -1848,14 +1966,14 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     txlist_merge(texs[0], texs[1], &texs_merged, &texs_remap);
 
     printf("TXLIST 1:\n");
-    for (uint32 i=0, iend=(uint32)arrlenu(texs[0]->tex_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(texs[0]->tex_array); i<iend; ++i) {
         TextureRecord *record = &texs[0]->tex_array[i];
         printf("%u: %s\n", i, record->name);
     }
     printf("\n");
 
     printf("TXLIST 2:\n");
-    for (uint32 i=0, iend=(uint32)arrlenu(texs[1]->tex_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(texs[1]->tex_array); i<iend; ++i) {
         TextureRecord *record = &texs[1]->tex_array[i];
         ptrdiff_t n = hmgeti(texs_remap, *record);
         printf("%02u: %s => ", i, record->name);
@@ -1867,7 +1985,7 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     printf("\n");
 
     printf("MERGED:\n");
-    for (uint32 i=0, iend=(uint32)arrlenu(texs_merged->tex_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(texs_merged->tex_array); i<iend; ++i) {
         TextureRecord *record = &texs_merged->tex_array[i];
         printf("%u: %s\n", i, record->name);
     }
@@ -2007,7 +2125,7 @@ int do_tex_list(int argc, char **argv, struct command *cmd) {
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_TXLIST);
     TextureList *txlist = txlist_load_from_tagblock(tagblock);
 
-    for (uint32 i=0, iend=(uint32)arrlenu(txlist->tex_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(txlist->tex_array); i<iend; ++i) {
         TextureRecord *record = &txlist->tex_array[i];
         dump("%u: %s\n", i, record->name);
     }
@@ -2036,7 +2154,7 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
     fprintf(f, "digraph BSP {\n");
     fprintf(f, "  node [shape=record];\n");
     LGWRBSPNode *node_array = wr->bsp_node_array;
-    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(node_array); i<iend; ++i) {
         LGWRBSPNode *node = &node_array[i];
 
         // Top row: node or leaf and id.
@@ -2136,17 +2254,17 @@ LGVector vcross(LGVector a, LGVector b) {
 
 void dump_worldrep_obj(WorldRep *wr, FILE *f) {
     fprintf(f, "mtllib wr.mtl\n");
-    for (uint32 c=0, cend=(uint32)arrlenu(wr->cell_array); c<cend; ++c) {
+    for (uint32 c=0, cend=arrlenu32(wr->cell_array); c<cend; ++c) {
         fprintf(f, "o cell.%05u\n", c);
         WorldRepCell *cell = &wr->cell_array[c];
-        for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+        for (uint32 v=0, vend=arrlenu32(cell->vertex_array); v<vend; ++v) {
             LGVector vert = cell->vertex_array[v];
             fprintf(f, "v %f %f %f\n", vert.x, vert.y, vert.z);
         }
 
         uint32 istart=0;
         int32 vcount = (int32)arrlen(cell->vertex_array);
-        for (uint32 p=0, pend=(uint32)arrlenu(cell->poly_array); p<pend; ++p) {
+        for (uint32 p=0, pend=arrlenu32(cell->poly_array); p<pend; ++p) {
             fprintf(f, "# poly %u\n", p);
             int is_render = (p<cell->header.num_render_polys);
             int is_portal = (p>=((uint32)cell->header.num_polys-(uint32)cell->header.num_portal_polys));
@@ -2167,7 +2285,7 @@ void dump_worldrep_obj(WorldRep *wr, FILE *f) {
     LGWRBSPNode *node_array = wr->bsp_node_array;
     LGVector world_up = { 0.0, 0.0, 1.0 };
     LGVector world_forward = { 0.0, 1.0, 0.0 };
-    for (uint32 n=0, nend=(uint32)arrlenu(node_array); n<nend; ++n) {
+    for (uint32 n=0, nend=arrlenu32(node_array); n<nend; ++n) {
         LGWRBSPNode *node = &node_array[n];
         if (BSP_IS_LEAF(node))
             continue;
@@ -2211,7 +2329,7 @@ void dump_worldrep_obj(WorldRep *wr, FILE *f) {
 void bsp_sanity_check(WorldRep *wr) {
     dump("BSP sanity check.\n");
     LGWRBSPNode *node_array = wr->bsp_node_array;
-    for (uint32 i=0, iend=(uint32)arrlenu(node_array); i<iend; ++i) {
+    for (uint32 i=0, iend=arrlenu32(node_array); i<iend; ++i) {
         LGWRBSPNode *node = &node_array[i];
 
         if (BSP_IS_LEAF(node)) {
@@ -2226,7 +2344,7 @@ void bsp_sanity_check(WorldRep *wr) {
             for (;;) {
                 float EPSILON = 0.001f; // generous
                 WorldRepCell *cell = &wr->cell_array[node->cell_id];
-                for (uint32 v=0, vend=(uint32)arrlenu(cell->vertex_array); v<vend; ++v) {
+                for (uint32 v=0, vend=arrlenu32(cell->vertex_array); v<vend; ++v) {
                     if (repeat)
                         dump("\t!! Vert %u\n", v);
                     LGVector pos = cell->vertex_array[v];
@@ -2408,6 +2526,51 @@ int do_test_write_minimal(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_wrlight(int argc, char **argv, struct command *cmd) {
+    if (argc!=1) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *tagblock = dbfile_get_wr_tagblock(dbfile);
+    WorldRep *wr = wr_load_from_tagblock(tagblock);
+    int is_wr = (wr->format==WorldRepFormatWR);
+
+    uint32 count = wr->num_static_lights+wr->num_dynamic_lights;
+    for (uint32 i=0, iend=count; i<iend; ++i) {
+        if (i==0)
+            dump("Static lights:\n");
+        if (i==wr->num_static_lights)
+            dump("Dynamic lights:\n");
+        dump("%u:\n", i);
+        LGWRRGBLight *light = &wr->light_array[i];
+        dump("\tlocation: %f %f %f\n", light->location.x, light->location.y, light->location.z);
+        dump("\tdirection: %f %f %f\n", light->direction.x, light->direction.y, light->direction.z);
+        if (is_wr) {
+            dump("\tbright: %f\n", light->bright.x);
+        } else {
+            dump("\tbright: %f %f %f\n", light->bright.x, light->bright.y, light->bright.z);
+        }
+        dump("\tinner: %f\n", light->inner);
+        dump("\touter: %f\n", light->outer);
+        dump("\tradius: %f\n", light->radius);
+        }
+    }
+    dump("\n");
+
+    dump("AnimLight to Cell:\n");
+    for (uint32 i=0, iend=arrlenu32(wr->animlight_to_cell_array); i<iend; ++i) {
+        LGWRAnimLightToCell *item = &wr->animlight_to_cell_array[i];
+        dump("%u:\tcell %u, palette index %u\n",
+            i,
+            (uint32)item->cell_index,
+            (uint32)item->pos_in_cell_palette);
+    }
+
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
 int do_dump_animlight(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
@@ -2434,9 +2597,9 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
         dump("    brightness: %f\n", base->brightness);
         dump("    offset: %f %f %f\n", base->offset.x, base->offset.y, base->offset.z);
         dump("    refresh: %d\n", animation->refresh);
-        dump("    first_light_to_cell: %u\n", (uint32)animation->first_light_to_cell);
-        dump("    num_cells_reached: %u\n", (uint32)animation->num_cells_reached);
-        dump("    light_data_index: %d\n", (int32)animation->light_data_index);
+        dump("    lighttocell_start: %u\n", (uint32)animation->lighttocell_start);
+        dump("    lighttocell_count: %u\n", (uint32)animation->lighttocell_count);
+        dump("    light_array_index: %d\n", (int32)animation->light_array_index);
         dump("    mode: %d\n", (int32)animation->mode);
         dump("    time_rising_ms: %d\n", (int32)animation->time_rising_ms);
         dump("    time_falling_ms: %d\n", (int32)animation->time_falling_ms);
@@ -2466,6 +2629,7 @@ struct command all_commands[] = {
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
     { "dump_animlight", do_dump_animlight,          "file.mis",             "dump animlight table to stdout." },
+    { "dump_wrlight", do_dump_wrlight,              "file.mis",             "dump WR light data table." },
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
     { NULL, NULL },
 };
