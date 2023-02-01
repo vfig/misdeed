@@ -339,16 +339,16 @@ typedef struct LGWRAnimLightToCell {
 } LGWRAnimLightToCell;
 
 typedef struct LGWRCSGPlane {
-   float64 a,b,c;   // Normal to the plane
-   float64 d;       // Plane equation: ax + by + cz + d = 0
+    float64 a,b,c;   // Normal to the plane
+    float64 d;       // Plane equation: ax + by + cz + d = 0
 } LGWRCSGPlane;
 
 // TODO: is this different in EXT? check PinkDot's info
 typedef struct LGWRCSGSurfaceRef {
-   int32 cell;
-   uint8 surface;
-   uint8 brush_face;
-   int16 vertex;
+    int32 cell;
+    uint8 surface;
+    uint8 brush_face;
+    int16 vertex;
 } LGWRCSGSurfaceRef;
 
 // NOTE: Two additional leading slots are used for sky and (default) water;
@@ -416,20 +416,29 @@ typedef struct LGAnimLightAnimation {
     bool32 inactive;
 } LGAnimLightAnimation;
 
-typedef struct LGAnimLight {
+typedef struct LGAnimLight76 {
     LGBaseLight base;
     LGAnimLightAnimation animation;
     float radius;
     int32 notify_script_objid;
     bool32 quad;
     float32 inner_radius;
-    bool32 is_dynamic;      // New in NewDark
-} LGAnimLight;
+} LGAnimLight76;
 
-typedef struct LGAnimLightProp {
+typedef struct LGAnimLight80 {
+    LGAnimLight76 x;
+    bool32 is_dynamic;      // New in NewDark
+} LGAnimLight80;
+
+typedef struct LGAnimLightProp76 {
     LGPropHeader header;
-    LGAnimLight prop;
-} LGAnimLightProp;
+    LGAnimLight76 prop;
+} LGAnimLightProp76;
+
+typedef struct LGAnimLightProp80 {
+    LGPropHeader header;
+    LGAnimLight80 prop;
+} LGAnimLightProp80;
 
 #pragma pack(pop)
 
@@ -1335,6 +1344,7 @@ DBFile *dbfile_merge_worldreps(
     arrsetlen(wrm->bsp_node_array, wrm_bsp_node_count);
     LGWRBSPNode split_node;
     BSP_SET_PARENT(&split_node, BSP_INVALID);
+    BSP_SET_FLAGS(&split_node, 0);
     split_node.plane_cell_id = -1;
     split_node.plane_id = 0;
     split_node.inside_index = wr1_bsp_node_start;
@@ -1593,35 +1603,62 @@ DBFile *dbfile_merge_worldreps(
     // NOTE: because the two arrays are being merged and not concatenated,
     //       we also have to apply fixups right now, because later we won't
     //       know which AnimLight comes from dbfile1 and which from dbfile2.
-    LGAnimLightProp *alm = NULL;
+    uint32 animlight_version_minor;
+    LGAnimLightProp80 *alm = NULL;
     {
-        LGAnimLightProp *al1 = NULL;
-        LGAnimLightProp *al2 = NULL;
+        LGAnimLightProp80 *al1 = NULL;
+        LGAnimLightProp80 *al2 = NULL;
         DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2 && tagblock->version.minor==80);
-        DBTAGBLOCK_READ_ARRAY(al1, tagblock);
+        assert(tagblock->version.major==2
+            && (tagblock->version.minor==76 || tagblock->version.minor==80));
+        animlight_version_minor = tagblock->version.minor;
+        if (animlight_version_minor==76) {
+            LGAnimLightProp76 *al1_old = NULL;
+            DBTAGBLOCK_READ_ARRAY(al1_old, tagblock);
+            arrsetlen(al1, arrlen(al1_old));
+            for (uint32 i=0, iend=arrlenu32(al1); i<iend; ++i) {
+                memcpy(&al1[i], &al1_old[i], sizeof(LGAnimLightProp76));
+                al1[i].prop.is_dynamic = 0;
+            }
+            arrfree(al1_old);
+        } else {
+            DBTAGBLOCK_READ_ARRAY(al1, tagblock);
+        }
         tagblock = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2 && tagblock->version.minor==80);
-        DBTAGBLOCK_READ_ARRAY(al2, tagblock);
+        assert(tagblock->version.major==2
+            && (tagblock->version.minor==76 || tagblock->version.minor==80));
+        assert(tagblock->version.minor==animlight_version_minor);
+        if (animlight_version_minor==76) {
+            LGAnimLightProp76 *al2_old = NULL;
+            DBTAGBLOCK_READ_ARRAY(al2_old, tagblock);
+            arrsetlen(al2, arrlen(al2_old));
+            for (uint32 i=0, iend=arrlenu32(al2); i<iend; ++i) {
+                memcpy(&al2[i], &al2_old[i], sizeof(LGAnimLightProp76));
+                al2[i].prop.is_dynamic = 0;
+            }
+            arrfree(al2_old);
+        } else {
+            DBTAGBLOCK_READ_ARRAY(al2, tagblock);
+        }
         assert(arrlen(al1)==arrlen(al2));
         arrsetlen(alm, arrlen(al1));
         uint16 lighttocell1_fixup = wr1_animlighttocell_start;
         uint16 lighttocell2_fixup = wr2_animlighttocell_start;
         for (uint32 i=0, iend=arrlenu32(alm); i<iend; ++i) {
-            int16 al1_index = al1[i].prop.animation.light_array_index;
-            int16 al2_index = al2[i].prop.animation.light_array_index;
+            int16 al1_index = al1[i].prop.x.animation.light_array_index;
+            int16 al2_index = al2[i].prop.x.animation.light_array_index;
             if (al1_index==-1) {
                 if (al2_index==-1) {
                     // Doesnt reach any cells in either wr; just copy it from 1.
                     alm[i] = al1[i];
                     // Make sure there's nothing to fixup.
-                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    LGAnimLightAnimation *anim = &alm[i].prop.x.animation;
                     assert(anim->lighttocell_count==0);
                 } else {
                     // Only reaches cells in wr2.
                     alm[i] = al2[i];
                     // Fixup light and cell indexes.
-                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    LGAnimLightAnimation *anim = &alm[i].prop.x.animation;
                     anim->lighttocell_start += lighttocell2_fixup;
                     int16 index = anim->light_array_index;
                     index = FIXUP_WR2_LIGHT_INDEX(index);
@@ -1632,7 +1669,7 @@ DBFile *dbfile_merge_worldreps(
                     // Only reaches cells in wr1.
                     alm[i] = al1[i];
                     // Fixup light and cell indexes.
-                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    LGAnimLightAnimation *anim = &alm[i].prop.x.animation;
                     anim->lighttocell_start += lighttocell1_fixup;
                     int16 index = anim->light_array_index;
                     index = FIXUP_WR1_LIGHT_INDEX(index);
@@ -1660,7 +1697,7 @@ DBFile *dbfile_merge_worldreps(
         if (tag_name_eq_str(src_tagblock->key, TAG_WR)
         || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
         || tag_name_eq_str(src_tagblock->key, TAG_WREXT)
-/*        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT)*/)
+        || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT))
             continue;
 
         DBTagBlock dest_tagblock = {0};
@@ -1675,18 +1712,25 @@ DBFile *dbfile_merge_worldreps(
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
-#if 0
     // Write the merged AnimLight prop to the output.
     {
         DBTagBlock tagblock = {0};
         tagblock.key = tag_name_from_str(TAG_PROP_ANIMLIGHT);
         tagblock.version.major = 2;
-        tagblock.version.minor = 80;
-
-        DBTAGBLOCK_WRITE_ARRAY(&tagblock, animlight_out_array);
+        tagblock.version.minor = animlight_version_minor;
+        if (animlight_version_minor==76) {
+            LGAnimLightProp76 *alm_old = NULL;
+            arrsetlen(alm_old, arrlen(alm));
+            for (uint32 i=0, iend=arrlenu32(alm_old); i<iend; ++i) {
+                memcpy(&alm_old[i], &alm[i], sizeof(LGAnimLightProp76));
+            }
+            DBTAGBLOCK_WRITE_ARRAY(&tagblock, alm_old);
+            arrfree(alm_old);
+        } else {
+            DBTAGBLOCK_WRITE_ARRAY(&tagblock, alm);
+        }
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
-#endif
 
     return dbfile_out;
 }
@@ -2466,6 +2510,183 @@ int do_dump_obj(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_wr(int argc, char **argv, struct command *cmd) {
+    if (argc!=1) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
+    WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+
+    const char *format_name[] = { "WR", "WRRGB", "WREXT" };
+    printf("format: %s\n", format_name[wr->format]);
+    printf("lightmap_bpp: %d\n", wr->lightmap_format.lightmap_bpp);
+    printf("lightmap_2x_modulation: %d\n", wr->lightmap_format.lightmap_2x_modulation);
+    printf("lightmap_scale: %f\n", wr->lightmap_format.lightmap_scale);
+    printf("flags: 0x%08x\n", wr->flags);
+    for (uint32 i=0, iend=arrlenu32(wr->cell_array); i<iend; ++i) {
+        WorldRepCell *cell = &wr->cell_array[i];
+        printf("CELL %u:\n", i);
+        printf("\tnum_vertices: %u\n", cell->header.num_vertices);
+        printf("\tnum_polys: %u\n", cell->header.num_polys);
+        printf("\tnum_render_polys: %u\n", cell->header.num_render_polys);
+        printf("\tnum_portal_polys: %u\n", cell->header.num_portal_polys);
+        printf("\tnum_planes: %u\n", cell->header.num_planes);
+        printf("\tmedium: %u\n", cell->header.medium);
+        printf("\tflags: 0x%02x\n", cell->header.flags);
+        printf("\tportal_vertex_list: %d\n", cell->header.portal_vertex_list);
+        printf("\tnum_vlist: %u\n", cell->header.num_vlist);
+        printf("\tnum_anim_lights: %u\n", cell->header.num_anim_lights);
+        printf("\tmotion_index: %u\n", cell->header.motion_index);
+        printf("\tsphere_center: %f %f %f \n", cell->header.sphere_center.x, cell->header.sphere_center.y, cell->header.sphere_center.z);
+        printf("\tsphere_radius: %f\n", cell->header.sphere_radius);
+        printf("\tlightmaps_size: %u\n", cell->lightmaps_size);
+        for (uint32 j=0, jend=arrlenu32(cell->vertex_array); j<jend; ++j) {
+            LGVector v = cell->vertex_array[j];
+            printf("\tVERTEX %u: %f %f %f\n", j, v.x, v.y, v.z);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->poly_array); j<jend; ++j) {
+            LGWRPoly *p = &cell->poly_array[j];
+            printf("\tPOLY %u:\n", j);
+            printf("\t\tflags: 0x%02x\n", p->flags);
+            printf("\t\tnum_vertices: %u\n", p->num_vertices);
+            printf("\t\tplaneid: %u\n", p->planeid);
+            printf("\t\tclut_id: %u\n", p->clut_id);
+            printf("\t\tdestination: %d\n", p->destination);
+            printf("\t\tmotion_index: %u\n", p->motion_index);
+            printf("\t\tpadding: %u\n", p->padding);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->renderpoly_array); j<jend; ++j) {
+            LGWRRenderPoly *rp = &cell->renderpoly_array[j];
+            printf("\tRENDERPOLY %u:\n", j);
+            printf("\t\ttex_u: %f %f %f\n", rp->tex_u.x, rp->tex_u.y, rp->tex_u.z);
+            printf("\t\ttex_v: %f %f %f\n", rp->tex_v.x, rp->tex_v.y, rp->tex_v.z);
+            printf("\t\tu_base: %u\n", rp->u_base);
+            printf("\t\tv_base: %u\n", rp->v_base);
+            printf("\t\ttexture_id: %u\n", rp->texture_id);
+            printf("\t\ttexture_anchor: %u\n", rp->texture_anchor);
+            printf("\t\tcached_surface: %u\n", rp->cached_surface);
+            printf("\t\ttexture_mag: %f\n", rp->texture_mag);
+            printf("\t\tcenter: %f %f %f\n", rp->center.x, rp->center.y, rp->center.z);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->renderpoly_ext_array); j<jend; ++j) {
+            LGWREXTRenderPoly *rp = &cell->renderpoly_ext_array[j];
+            printf("\tRENDERPOLY %u:\n", j);
+            printf("\t\ttex_u: %f %f %f\n", rp->tex_u.x, rp->tex_u.y, rp->tex_u.z);
+            printf("\t\ttex_v: %f %f %f\n", rp->tex_v.x, rp->tex_v.y, rp->tex_v.z);
+            printf("\t\tu_base: %f\n", rp->u_base);
+            printf("\t\tv_base: %f\n", rp->v_base);
+            printf("\t\ttexture_id: %u\n", rp->texture_id);
+            printf("\t\tcached_surface: %u\n", rp->cached_surface);
+            printf("\t\ttexture_mag: %f\n", rp->texture_mag);
+            printf("\t\tcenter: %f %f %f\n", rp->center.x, rp->center.y, rp->center.z);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->index_array); j<jend; ++j) {
+            uint8 index = cell->index_array[j];
+            printf("\tINDEX %u: %u\n", j, index);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->plane_array); j<jend; ++j) {
+            LGWRPlane p = cell->plane_array[j];
+            printf("\tPLANE %u: %f %f %f %f\n", j, p.normal.x, p.normal.x, p.normal.z, p.distance);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->animlight_array); j<jend; ++j) {
+            int16 animlight = cell->animlight_array[j];
+            printf("\tANIMLIGHT %u: %d\n", j, animlight);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->lightmapinfo_array); j<jend; ++j) {
+            LGWRLightMapInfo *l = &cell->lightmapinfo_array[j];
+            printf("\tLIGHTMAPINFO %u:\n", j);
+            printf("\t\tu_base: %d\n", l->u_base);
+            printf("\t\tv_base: %d\n", l->v_base);
+            printf("\t\tpadded_width: %d\n", l->padded_width);
+            printf("\t\theight: %u\n", l->height);
+            printf("\t\twidth: %u\n", l->width);
+            printf("\t\tdata_ptr: 0x%08x\n", l->data_ptr);
+            printf("\t\tdynamic_light_ptr: 0x%08x\n", l->dynamic_light_ptr);
+            printf("\t\tanim_light_bitmask: 0x%08x\n", l->anim_light_bitmask);
+        }
+        for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
+            int16 index = cell->light_index_array[j];
+            printf("\tLIGHT_INDEX %u: %d\n", j, index);
+        }
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->bsp_extraplane_array); i<iend; ++i) {
+        LGWRPlane p = wr->bsp_extraplane_array[i];
+        printf("BSP_EXTRA_PLANE %u: %f %f %f %f\n", i, p.normal.x, p.normal.x, p.normal.z, p.distance);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->bsp_node_array); i<iend; ++i) {
+        LGWRBSPNode *node = &wr->bsp_node_array[i];
+        printf("BSP_NODE %u:\n", i);
+        printf("\tparent_index: %08x (parent: %u, flags %02x)\n",
+            node->parent_index, BSP_GET_PARENT(node), BSP_GET_FLAGS(node));
+        printf("\tplane_cell_id: %d\n", node->plane_cell_id);
+        printf("\tplane_id: %d\n", node->plane_id);
+        if (BSP_IS_LEAF(node)) {
+            printf("\tcell_id: %u\n", node->cell_id);
+            printf("\tpad4: %u\n", node->pad4);
+        } else {
+            printf("\tinside_index: %u\n", node->inside_index);
+            printf("\toutside_index: %u\n", node->outside_index);
+        }
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->cell_weatherzones_array); i<iend; ++i) {
+        uint8 v = wr->cell_weatherzones_array[i];
+        printf("CELL_WEATHERZONE %u: %u\n", i, v);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->cell_renderoptions_array); i<iend; ++i) {
+        uint8 v = wr->cell_renderoptions_array[i];
+        printf("CELL_RENDEROPTIONS %u: 0x%02x\n", i, v);
+    }
+    printf("num_static_lights: %u\n", wr->num_static_lights);
+    printf("num_dynamic_lights: %u\n", wr->num_dynamic_lights);
+    for (uint32 i=0, iend=arrlenu32(wr->light_array); i<iend; ++i) {
+        LGWRRGBLight *l = &wr->light_array[i];
+        printf("LIGHT %u:\n", i);
+        printf("\tlocation: %f %f %f\n", l->location.x, l->location.y, l->location.z);
+        printf("\tdirection: %f %f %f\n", l->direction.x, l->direction.y, l->direction.z);
+        printf("\tbright: %f %f %f\n", l->bright.x, l->bright.y, l->bright.z);
+        printf("\tinner: %f\n", l->inner);
+        printf("\touter: %f\n", l->outer);
+        printf("\tradius: %f\n", l->radius);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->animlight_to_cell_array); i<iend; ++i) {
+        LGWRAnimLightToCell *l = &wr->animlight_to_cell_array[i];
+        printf("ANIMLIGHT_TO_CELL %u:\n", i);
+        printf("\tcell_index: %u\n", l->cell_index);
+        printf("\tpos_in_cell_palette: %u\n", l->pos_in_cell_palette);
+        printf("\tpad0: %u\n", l->pad0);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brfaces_array); i<iend; ++i) {
+        int32 v = wr->csg_brfaces_array[i];
+        printf("CSG_BRFACES %u: 0x%08x\n", i, v);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
+        int32 v = wr->csg_brush_plane_count_array[i];
+        printf("CSG_BRUSH_PLANE_COUNT %u: %d\n", i, v);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_planes_array); i<iend; ++i) {
+        LGWRCSGPlane p = wr->csg_brush_planes_array[i];
+        printf("CSG_BRUSH_PLANE %u: %f %f %f %f\n", i, p.a, p.b, p.c, p.d);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
+        int32 v = wr->csg_brush_surfaceref_count_array[i];
+        printf("CSG_BRUSH_SURFACEREF_COUNT %u: %d\n", i, v);
+    }
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfacerefs_array); i<iend; ++i) {
+        LGWRCSGSurfaceRef *r = &wr->csg_brush_surfacerefs_array[i];
+        printf("CSG_BRUSH_SURFACEREF %u:\n", i);
+        printf("\tcell: %d\n", r->cell);
+        printf("\tsurface: %u\n", r->surface);
+        printf("\tbrush_face: %u\n", r->brush_face);
+        printf("\tvertex: %d\n", r->vertex);
+    }
+
+    wr_free(&wr);
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
 int do_bsp_sanity_check(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
@@ -2588,21 +2809,21 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
 
-    uint32 count = tagblock->size/sizeof(LGAnimLightProp);
+    uint32 count = tagblock->size/sizeof(LGAnimLightProp80);
     char *pread = (char *)tagblock->data;
-    LGAnimLightProp *props = NULL;
+    LGAnimLightProp80 *props = NULL;
     MEM_READ_ARRAY(props, count, pread);
     dump("%u animlights:\n", count);
     for (uint32 i=0; i<count; ++i) {
-        LGAnimLightProp *prop = &props[i];
+        LGAnimLightProp80 *prop = &props[i];
         dump("%4u:\n", i);
         dump("    id: %d\n", prop->header.id);
         dump("    size: %u\n", prop->header.size);
-        dump("    sizeof(LGAnimLightProp): %u\n", (uint32)sizeof(LGAnimLight));
-        assert(prop->header.size==sizeof(LGAnimLight));
-        LGAnimLight *animlight = &(props[i].prop);
-        LGBaseLight *base = &(animlight->base);
-        LGAnimLightAnimation *animation = &(animlight->animation);
+        dump("    sizeof(LGAnimLight80): %u\n", (uint32)sizeof(LGAnimLight80));
+        assert(prop->header.size==sizeof(LGAnimLight80));
+        LGAnimLight80 *animlight = &(props[i].prop);
+        LGBaseLight *base = &(animlight->x.base);
+        LGAnimLightAnimation *animation = &(animlight->x.animation);
         dump("    brightness: %f\n", base->brightness);
         dump("    offset: %f %f %f\n", base->offset.x, base->offset.y, base->offset.z);
         dump("    refresh: %d\n", animation->refresh);
@@ -2637,6 +2858,7 @@ struct command all_commands[] = {
     { "merge", do_merge,                            "top.mis bottom.mis -o out.mis",  "Merge two worldreps." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
+    { "dump_wr", do_dump_wr,                        "file.mis",             "dump the WR to stdout." },
     { "dump_animlight", do_dump_animlight,          "file.mis",             "dump animlight table to stdout." },
     { "dump_wrlight", do_dump_wrlight,              "file.mis",             "dump WR light data table." },
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
