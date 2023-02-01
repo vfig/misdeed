@@ -867,6 +867,13 @@ void *wr_read_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata
     uint32 num_light_indices;
     MEM_READ(num_light_indices, pread);
     MEM_READ_ARRAY(cell->light_index_array, num_light_indices, pread);
+    // TODO: WAAAAAAAAAAAAAAAAAAAAAAAAAAAAHGH
+    //       we have some weird shenanigans going on.. it seems like
+    //       light_index_array[0] -- yes, even on disk -- is the number
+    //       of indices??? assert that that is true.
+    //       corollary: we should never fixup light_index_array[0]!
+    assert(num_light_indices>0);
+    assert((uint32)(cell->light_index_array[0])==num_light_indices-1);
     return pread;
 }
 
@@ -1282,7 +1289,6 @@ DBFile *dbfile_merge_worldreps(
     wrm->format = wr1->format;
     wrm->lightmap_format = wr1->lightmap_format;
     wrm->flags = wr1->flags;
-    int is_wr = (wr1->format==WorldRepFormatWR);
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
     // wrm cells := [wr1 cells] [wr2 cells]
@@ -1339,6 +1345,110 @@ DBFile *dbfile_merge_worldreps(
     for (uint32 i=0, j=wr2_bsp_node_start; i<wr2_bsp_node_count; ++i, ++j)
         wrm->bsp_node_array[j] = wr2->bsp_node_array[i];
 
+    // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
+    if (is_wrext) {
+        int16 wr1_cell_weatherzones_count = (int16)arrlen(wr1->cell_weatherzones_array);
+        int16 wr2_cell_weatherzones_count = (int16)arrlen(wr2->cell_weatherzones_array);
+        assert(wr1_cell_weatherzones_count==wr1_cell_count);
+        assert(wr2_cell_weatherzones_count==wr2_cell_count);
+        int16 wrm_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
+        int16 wr1_cell_weatherzones_start = 0;
+        int16 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
+        arrsetlen(wrm->cell_weatherzones_array, wrm_cell_weatherzones_count);
+        for (int16 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
+            wrm->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
+        for (int16 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
+            wrm->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
+    }
+
+    // wrm cell-renderoptions := [wr1 cell-renderoptions] [wr2 cell-renderoptions]
+    if (is_wrext
+    && wrm->flags&LGWREXTFlagCellRenderOptions) {
+        int16 wr1_cell_renderoptions_count = (int16)arrlen(wr1->cell_renderoptions_array);
+        int16 wr2_cell_renderoptions_count = (int16)arrlen(wr2->cell_renderoptions_array);
+        assert(wr1_cell_renderoptions_count==wr1_cell_count);
+        assert(wr2_cell_renderoptions_count==wr2_cell_count);
+        int16 wrm_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
+        int16 wr1_cell_renderoptions_start = 0;
+        int16 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
+        arrsetlen(wrm->cell_renderoptions_array, wrm_cell_renderoptions_count);
+        for (int16 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
+            wrm->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
+        for (int16 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
+            wrm->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
+    }
+
+    // wrm lights := [sun]
+    //               [wr1 static lights, except sun]
+    //               [wr2 static lights, except sun]
+    //               [wr1 dynamic lights]
+    //               [wr2 dynamic lights]
+    // NOTE: The first entry in the light table is always present, and reserved
+    //       for sunlight; we treat it as a special case.
+    // NOTE: "static" lights are Renderer>Light and Renderer>AnimLight.
+    //       "dynamic" lights are Renderer>Dynamic Light.
+    // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
+    // TODO: are dynamic lights put in the table even if outside the world?
+    //       would make sense, right? so concatenatic the dynamic lights might be wrong!
+    int16 wr1_static_light_count = (int16)wr1->num_static_lights-1;
+    int16 wr2_static_light_count = (int16)wr2->num_static_lights-1;
+    int16 wr1_dynamic_light_count = (int16)wr1->num_dynamic_lights;
+    int16 wr2_dynamic_light_count = (int16)wr2->num_dynamic_lights;
+    wrm->num_static_lights = 1+wr1_static_light_count+wr2_static_light_count;
+    wrm->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
+    assert(wrm->num_static_lights<=768); // TODO: did NewDark raise this limit?
+    assert(wrm->num_dynamic_lights<=32);
+    int16 wrm_total_light_count = (int16)(wrm->num_static_lights+wrm->num_dynamic_lights);
+    int16 wr1_static_light_start = 1,
+          wr1_static_light_end = wr1_static_light_start+wr1_static_light_count;
+    int16 wr2_static_light_start = wr1_static_light_end,
+          wr2_static_light_end = wr2_static_light_start+wr2_static_light_count;
+    int16 wr1_dynamic_light_start = wr2_static_light_end,
+          wr1_dynamic_light_end = wr1_dynamic_light_start+wr1_dynamic_light_count;
+    int16 wr2_dynamic_light_start = wr1_dynamic_light_end,
+          wr2_dynamic_light_end = wr2_dynamic_light_start+wr2_dynamic_light_count;
+    assert(wrm_total_light_count==( (int16)arrlen(wr1->light_array)
+                                  + (int16)arrlen(wr2->light_array)
+                                  - 1 ));
+    arrsetlen(wrm->light_array, wrm_total_light_count);
+    wrm->light_array[0] = wr1->light_array[0];
+    for (int16 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
+        wrm->light_array[j] = wr1->light_array[1+i];
+    for (int16 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
+        wrm->light_array[j] = wr2->light_array[1+i];
+    for (int16 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
+        wrm->light_array[j] = wr1->light_array[1+wr1_static_light_count+i];
+    for (int16 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
+        wrm->light_array[j] = wr2->light_array[1+wr2_static_light_count+i];
+    // a: invalid or sunlight index is unchanged.
+    // b: wr1 static light indexes are unchanged.
+    // c: wr1 dynamic lights come after wr2 static lights.
+    #define FIXUP_WR1_LIGHT_INDEX(i) ( \
+        ((i)<=0)? (i) : \
+        ((i)<(1+wr1_static_light_count))? (i) : \
+            ((i)+wr2_static_light_count) )
+    // a: invalid or sunlight index is unchanged.
+    // b: wr2 static light indexes now come after wr1 static lights.
+    // c: wr2 dynamic lights now come after wr1 static and dynamic lights 
+    #define FIXUP_WR2_LIGHT_INDEX(i) ( \
+        ((i)<=0)? (i) : \
+        ((i)<(1+wr2_static_light_count))? ((i)+wr1_static_light_count) : \
+            ((i)+wr1_static_light_count+wr1_dynamic_light_count) )
+
+    // wrm animlighttocell := [wr1 animlighttocell] [wr2 animlighttocell]
+    uint16 wr1_animlighttocell_count = (uint16)arrlenu(wr1->animlight_to_cell_array);
+    uint16 wr2_animlighttocell_count = (uint16)arrlenu(wr2->animlight_to_cell_array);
+    uint16 wr1_animlighttocell_start = 0,
+           wr1_animlighttocell_end = wr1_animlighttocell_start+wr1_animlighttocell_count;
+    uint16 wr2_animlighttocell_start = wr1_animlighttocell_end,
+           wr2_animlighttocell_end = wr2_animlighttocell_start+wr2_animlighttocell_count;
+    uint16 wrm_animlighttocell_count = wr1_animlighttocell_count+wr2_animlighttocell_count;
+    arrsetlen(wrm->animlight_to_cell_array, wrm_animlighttocell_count);
+    for (uint16 i=0, j=wr1_animlighttocell_start; i<wr1_animlighttocell_count; ++i, ++j)
+        wrm->animlight_to_cell_array[j] = wr1->animlight_to_cell_array[i];
+    for (uint16 i=0, j=wr2_animlighttocell_start; i<wr2_animlighttocell_count; ++i, ++j)
+        wrm->animlight_to_cell_array[j] = wr2->animlight_to_cell_array[i];
+
     // Fixup cells:
     for (int16 i=0; i<wrm_cell_count; ++i) {
         int16 cell_fixup;
@@ -1356,6 +1466,37 @@ DBFile *dbfile_merge_worldreps(
         for (uint32 p=portal_start; p<portal_end; ++p) {
             cell->poly_array[p].destination += cell_fixup;
         }
+
+        // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
+        // Fixup light and animlight indexes.
+        if (i>=wr1_cell_start && i<wr1_cell_end) {
+            for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
+                if (j==0) continue; // light_index_array[0] is the light count!
+                uint16 index = cell->light_index_array[j];
+                index = FIXUP_WR1_LIGHT_INDEX(index);
+                cell->light_index_array[j] = index;
+            }
+            for (uint32 j=0, jend=arrlenu32(cell->animlight_array); j<jend; ++j) {
+                uint16 index = cell->animlight_array[j];
+                index = FIXUP_WR1_LIGHT_INDEX(index);
+                cell->animlight_array[j] = index;
+            }
+        } else if (i>=wr2_cell_start && i<wr2_cell_end) {
+            for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
+                if (j==0) continue; // light_index_array[0] is the light count!
+                uint16 index = cell->light_index_array[j];
+                index = FIXUP_WR2_LIGHT_INDEX(index);
+                cell->light_index_array[j] = index;
+            }
+            for (uint32 j=0, jend=arrlenu32(cell->animlight_array); j<jend; ++j) {
+                uint16 index = cell->animlight_array[j];
+                index = FIXUP_WR2_LIGHT_INDEX(index);
+                cell->animlight_array[j] = index;
+            }
+        } else {
+            // Nothing to fixup.
+        }
+
     }
 
     // Fixup bsp nodes:
@@ -1415,216 +1556,18 @@ DBFile *dbfile_merge_worldreps(
         BSP_SET_FLAGS(node, flags);
     }
 
-    // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
-    if (is_wrext) {
-        int16 wr1_cell_weatherzones_count = (int16)arrlen(wr1->cell_weatherzones_array);
-        int16 wr2_cell_weatherzones_count = (int16)arrlen(wr2->cell_weatherzones_array);
-        assert(wr1_cell_weatherzones_count==wr1_cell_count);
-        assert(wr2_cell_weatherzones_count==wr2_cell_count);
-        int16 wrm_cell_weatherzones_count = wr1_cell_weatherzones_count+wr2_cell_weatherzones_count;
-        int16 wr1_cell_weatherzones_start = 0;
-        int16 wr2_cell_weatherzones_start = wr1_cell_weatherzones_start+wr1_cell_weatherzones_count;
-        arrsetlen(wrm->cell_weatherzones_array, wrm_cell_weatherzones_count);
-        for (int16 i=0, j=wr1_cell_weatherzones_start; i<wr1_cell_weatherzones_count; ++i, ++j)
-            wrm->cell_weatherzones_array[j] = wr1->cell_weatherzones_array[i];
-        for (int16 i=0, j=wr2_cell_weatherzones_start; i<wr2_cell_weatherzones_count; ++i, ++j)
-            wrm->cell_weatherzones_array[j] = wr2->cell_weatherzones_array[i];
-    }
-
-    // wrm cell-renderoptions := [wr1 cell-renderoptions] [wr2 cell-renderoptions]
-    if (is_wrext
-    && wrm->flags&LGWREXTFlagCellRenderOptions) {
-        int16 wr1_cell_renderoptions_count = (int16)arrlen(wr1->cell_renderoptions_array);
-        int16 wr2_cell_renderoptions_count = (int16)arrlen(wr2->cell_renderoptions_array);
-        assert(wr1_cell_renderoptions_count==wr1_cell_count);
-        assert(wr2_cell_renderoptions_count==wr2_cell_count);
-        int16 wrm_cell_renderoptions_count = wr1_cell_renderoptions_count+wr2_cell_renderoptions_count;
-        int16 wr1_cell_renderoptions_start = 0;
-        int16 wr2_cell_renderoptions_start = wr1_cell_renderoptions_start+wr1_cell_renderoptions_count;
-        arrsetlen(wrm->cell_renderoptions_array, wrm_cell_renderoptions_count);
-        for (int16 i=0, j=wr1_cell_renderoptions_start; i<wr1_cell_renderoptions_count; ++i, ++j)
-            wrm->cell_renderoptions_array[j] = wr1->cell_renderoptions_array[i];
-        for (int16 i=0, j=wr2_cell_renderoptions_start; i<wr2_cell_renderoptions_count; ++i, ++j)
-            wrm->cell_renderoptions_array[j] = wr2->cell_renderoptions_array[i];
-    }
-
-    // wrm lights := [sun]
-    //               [wr1 static lights, except sun]
-    //               [wr2 static lights, except sun]
-    //               [wr1 dynamic lights]
-    //               [wr2 dynamic lights]
-    // NOTE: The first entry in the light table is always present, and reserved
-    //       for sunlight.
-    // NOTE: "static" lights are Renderer>Light and Renderer>AnimLight.
-    //       "dynamic" lights are Renderer>Dynamic Light.
-    // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
-    // TODO: are dynamic lights put in the table even if outside the world?
-    //       would make sense, right? so concatenatic the dynamic lights might be wrong!
-    int16 wr1_static_light_count = (int16)wr1->num_static_lights-1;
-    int16 wr2_static_light_count = (int16)wr2->num_static_lights-1;
-    int16 wr1_dynamic_light_count = (int16)wr1->num_dynamic_lights;
-    int16 wr2_dynamic_light_count = (int16)wr2->num_dynamic_lights;
-    wrm->num_static_lights = 1+wr1_static_light_count+wr2_static_light_count;
-    wrm->num_dynamic_lights = wr1_dynamic_light_count+wr2_dynamic_light_count;
-    assert(wrm->num_static_lights<=768); // TODO: did NewDark raise this limit?
-    assert(wrm->num_dynamic_lights<=32);
-    int16 wrm_total_light_count = (int16)(wrm->num_static_lights+wrm->num_dynamic_lights);
-    int16 wr1_static_light_start = 1,
-          wr1_static_light_end = wr1_static_light_start+wr1_static_light_count;
-    int16 wr2_static_light_start = wr1_static_light_end,
-          wr2_static_light_end = wr2_static_light_start+wr2_static_light_count;
-    int16 wr1_dynamic_light_start = wr2_static_light_end,
-          wr1_dynamic_light_end = wr1_dynamic_light_start+wr1_dynamic_light_count;
-    int16 wr2_dynamic_light_start = wr1_dynamic_light_end,
-          wr2_dynamic_light_end = wr2_dynamic_light_start+wr2_dynamic_light_count;
-    assert(wrm_total_light_count==( (int16)arrlen(wr1->light_array)
-                                  + (int16)arrlen(wr2->light_array)
-                                  - 1 ));
-    arrsetlen(wrm->light_array, wrm_total_light_count);
-    wrm->light_array[0] = wr1->light_array[0];
-    for (int16 i=0, j=wr1_static_light_start; i<wr1_static_light_count; ++i, ++j)
-        wrm->light_array[j] = wr1->light_array[1+i];
-    for (int16 i=0, j=wr2_static_light_start; i<wr2_static_light_count; ++i, ++j)
-        wrm->light_array[j] = wr2->light_array[1+i];
-    for (int16 i=0, j=wr1_dynamic_light_start; i<wr1_dynamic_light_count; ++i, ++j)
-        wrm->light_array[j] = wr1->light_array[1+wr1_static_light_count+i];
-    for (int16 i=0, j=wr2_dynamic_light_start; i<wr2_dynamic_light_count; ++i, ++j)
-        wrm->light_array[j] = wr2->light_array[1+wr2_static_light_count+i];
-
-    // TEMP: template for the copying of stuff?
-    // uint32 wr1_xxx_count = arrlenu32(wr1->xxx_array);
-    // uint32 wr2_xxx_count = arrlenu32(wr2->xxx_array);
-    // uint32 wr_xxx_count = wr1_xxx_count+wr2_xxx_count;
-    // uint32 wr1_xxx_start = 0;
-    // uint32 wr2_xxx_start = wr1_xxx_start+wr1_xxx_count;
-    // arrsetlen(wr->xxx_array, wr_xxx_count);
-    // for (uint32 i=0, j=wr1_xxx_start; i<wr1_xxx_count; ++i, ++j)
-    //     wr->xxx_array[j] = wr1->xxx_array[i];
-    // for (uint32 i=0, j=wr2_xxx_start; i<wr2_xxx_count; ++i, ++j)
-    //     wr->xxx_array[j] = wr2->xxx_array[i];
-
-#if 0
-    aaaaaaargh what about cell->animlight_array ??? these are also indices into the light_data table.
-    i do NOT want to repeat those if (index<><><><>) a FIFTH TIME!!!
-
-    // Fixup light_index_array in each wr1 and wr2 cell.
-    // TODO: how does NewDark's "dynamic light" checkbox on AnimLights complicate this?
-    for (uint32 i=wr1_cell_start, iend=wr1_cell_start+wr1_cell_count; i<iend; ++i) {
-        WorldRepCell *cell = &wr->cell_array[i];
-        for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
-            uint16 index = cell->light_index_array[j];
-            if (index==0) {
-                // sunlight index is unchanged.
-            } else if (index<(1+wr1_static_light_count)) {
-                // wr1 static light indexes are unchanged.
-            } else {
-                // wr1 dynamic lights now come after wr2 static lights
-                index += wr2_static_light_count;
-            }
-            cell->light_index_array[j] = index;
+    // Fixup animlighttocell:
+    for (uint32 i=0; i<wrm_animlighttocell_count; ++i) {
+        int16 cell_fixup;
+        if (i>=wr1_animlighttocell_start && i<wr1_animlighttocell_end) {
+            cell_fixup = wr1_cell_start;
+        } else if (i>=wr2_animlighttocell_start && i<wr2_animlighttocell_end) {
+            cell_fixup = wr2_cell_start;
+        } else {
+            cell_fixup = 0;
         }
+        wrm->animlight_to_cell_array[i].cell_index += cell_fixup;
     }
-    for (uint32 i=wr2_cell_start, iend=wr2_cell_start+wr2_cell_count; i<iend; ++i) {
-        WorldRepCell *cell = &wr->cell_array[i];
-        for (uint32 j=0, jend=arrlenu32(cell->light_index_array); j<jend; ++j) {
-            uint16 index = cell->light_index_array[j];
-            if (index==0) {
-                // sunlight index is unchanged.
-            } else if (index<(1+wr2_static_light_count)) {
-                // wr2 static light indexes now come after wr1 static lights
-                index += wr1_static_light_count;
-            } else {
-                // wr2 dynamic lights now come after wr1 static and dynamic lights 
-                index += (wr1_static_light_count+wr1_dynamic_light_count);
-            }
-            cell->light_index_array[j] = index;
-        }
-    }
-
-    // Merge animlight_to_cell_arrays:
-    uint32 wr1_animlighttocell_count = arrlenu32(wr1->animlight_to_cell_array);
-    uint32 wr2_animlighttocell_count = arrlenu32(wr2->animlight_to_cell_array);
-    uint32 wr1_animlighttocell_start = 0;
-    uint32 wr2_animlighttocell_start = wr1_animlighttocell_count;
-    uint32 wr_animlighttocell_count = wr1_animlighttocell_count+wr2_animlighttocell_count;
-    arrsetlen(wr->animlight_to_cell_array, wr_animlighttocell_count);
-    {
-        int16 cell_fixup = 0;
-        for (uint32 i=0, j=wr1_animlighttocell_start; i<wr1_animlighttocell_count; ++i, ++j) {
-            wr->animlight_to_cell_array[j] = wr1->animlight_to_cell_array[i];
-            wr->animlight_to_cell_array[j].cell_index += cell_fixup;
-        }
-        cell_fixup = (uint16)wr1_cell_count;
-        for (uint32 i=0, j=wr2_animlighttocell_start; i<wr2_animlighttocell_count; ++i, ++j) {
-            wr->animlight_to_cell_array[j] = wr2->animlight_to_cell_array[i];
-            wr->animlight_to_cell_array[j].cell_index += cell_fixup;
-        }
-    }
-   
-    // Merge and fixup AnimLight propertys.
-    LGAnimLightProp *animlight1_array = NULL;
-    LGAnimLightProp *animlight2_array = NULL;
-    LGAnimLightProp *animlight_out_array = NULL;
-    int16 lighttocell_fixup = wr1_animlighttocell_count;
-    {
-        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2
-            && tagblock->version.minor==80);
-        DBTAGBLOCK_READ_ARRAY(animlight1_array, tagblock);
-        tagblock = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2
-            && tagblock->version.minor==80);
-        DBTAGBLOCK_READ_ARRAY(animlight2_array, tagblock);
-        assert(arrlenu32(animlight1_array)==arrlenu32(animlight2_array));
-        arrsetlen(animlight_out_array, arrlen(animlight1_array));
-
-        for (uint32 i=0, iend=arrlenu32(animlight_out_array); i<iend; ++i) {
-            LGAnimLightAnimation *anim1 = &animlight1_array[i].prop.animation;
-            LGAnimLightAnimation *anim2 = &animlight2_array[i].prop.animation;
-            if (anim1->light_array_index==-1) {
-                if (anim2->light_array_index==-1) {
-                    // This light isnt doing anything! just copy it from 1.
-                    animlight_out_array[i] = animlight1_array[i];
-                } else {
-                    // Copy this light from 2, and fix it up.
-                    animlight_out_array[i] = animlight2_array[i];
-                    LGAnimLightAnimation *anim = &animlight_out_array[i].prop.animation;
-                    anim->lighttocell_start += lighttocell_fixup;
-                    int16 index = anim->light_array_index;
-                    if (index<=0) {
-                        // invalid or sunlight index is unchanged.
-                    } else if (index<(1+wr2_static_light_count)) {
-                        // wr2 static light indexes now come after wr1 static lights
-                        index += wr1_static_light_count;
-                    } else {
-                        // wr2 dynamic lights now come after wr1 static and dynamic lights 
-                        index += (wr1_static_light_count+wr1_dynamic_light_count);
-                    }
-                    anim->light_array_index = index;
-                }
-            } else {
-                if (anim2->light_array_index==-1) {
-                    // Copy this light from 1, and fix it up.
-                    animlight_out_array[i] = animlight2_array[i];
-                    LGAnimLightAnimation *anim = &animlight_out_array[i].prop.animation;
-                    // wr1 lights don't need lighttocell fixups.
-                    int16 index = anim->light_array_index;
-                    if (index<=0) {
-                        // invalid or sunlight index is unchanged.
-                    } else if (index<(1+wr1_static_light_count)) {
-                        // wr1 static light indexes are unchanged.
-                    } else {
-                        // wr1 dynamic lights now come after wr2 static lights
-                        index += wr2_static_light_count;
-                    }
-                    anim->light_array_index = index;
-                } else {
-                    abort_message("animlight in both worldreps is complicated and not supported yet.");
-                }
-            }
-        }
-    }
-#endif
 
     /*
     OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
@@ -1636,6 +1579,73 @@ DBFile *dbfile_merge_worldreps(
     // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
     // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
+
+    // merged AnimLight props := ...well...
+    //
+    // AnimLight props are stored per-object; since the objects in both input
+    // files are required to be identical, we take AnimLight properties from
+    // dbfile1 by default, but override them with AnimLight properties from
+    // dbfile2 for lights which affected wr2 and not wr1. This can be determined
+    // by the light_array_index: it will be >=0 for AnimLights that reached
+    // cells. If there are any AnimLights that reached cells in both wr1 and
+    // wr2, there isn't a simple way to deal with that, so we just disallow it.
+    //
+    // NOTE: because the two arrays are being merged and not concatenated,
+    //       we also have to apply fixups right now, because later we won't
+    //       know which AnimLight comes from dbfile1 and which from dbfile2.
+    LGAnimLightProp *alm = NULL;
+    {
+        LGAnimLightProp *al1 = NULL;
+        LGAnimLightProp *al2 = NULL;
+        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
+        assert(tagblock->version.major==2 && tagblock->version.minor==80);
+        DBTAGBLOCK_READ_ARRAY(al1, tagblock);
+        tagblock = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
+        assert(tagblock->version.major==2 && tagblock->version.minor==80);
+        DBTAGBLOCK_READ_ARRAY(al2, tagblock);
+        assert(arrlen(al1)==arrlen(al2));
+        arrsetlen(alm, arrlen(al1));
+        uint16 lighttocell1_fixup = wr1_animlighttocell_start;
+        uint16 lighttocell2_fixup = wr2_animlighttocell_start;
+        for (uint32 i=0, iend=arrlenu32(alm); i<iend; ++i) {
+            int16 al1_index = al1[i].prop.animation.light_array_index;
+            int16 al2_index = al2[i].prop.animation.light_array_index;
+            if (al1_index==-1) {
+                if (al2_index==-1) {
+                    // Doesnt reach any cells in either wr; just copy it from 1.
+                    alm[i] = al1[i];
+                    // Make sure there's nothing to fixup.
+                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    assert(anim->lighttocell_count==0);
+                } else {
+                    // Only reaches cells in wr2.
+                    alm[i] = al2[i];
+                    // Fixup light and cell indexes.
+                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    anim->lighttocell_start += lighttocell2_fixup;
+                    int16 index = anim->light_array_index;
+                    index = FIXUP_WR2_LIGHT_INDEX(index);
+                    anim->light_array_index = index;
+                }
+            } else {
+                if (al2_index==-1) {
+                    // Only reaches cells in wr1.
+                    alm[i] = al1[i];
+                    // Fixup light and cell indexes.
+                    LGAnimLightAnimation *anim = &alm[i].prop.animation;
+                    anim->lighttocell_start += lighttocell1_fixup;
+                    int16 index = anim->light_array_index;
+                    index = FIXUP_WR1_LIGHT_INDEX(index);
+                    anim->light_array_index = index;
+                } else {
+                    abort_format("AnimLight ObjID %d is in both worldreps!",
+                        alm[i].header.id);
+                }
+            }
+        }
+        arrfree(al1);
+        arrfree(al2);
+    }
 
     // Write the output file.
 
