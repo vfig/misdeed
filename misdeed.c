@@ -94,6 +94,8 @@ void dump(char *fmt, ...) {
     memcpy((a)+sa,(b),sb*sizeof((a)[0])); \
     }while(0)
 
+#define UNUSED(x) (void)(x)
+
 #define MEM_ZERO(buf, size) memset(buf, 0, size)
 
 #define MEM_READ_SIZE(buf, size, p) \
@@ -134,6 +136,7 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 #define TAG_WR      "WR"
 #define TAG_WRRGB   "WRRGB"
 #define TAG_WREXT   "WREXT"
+#define TAG_BRLIST  "BRLIST"
 #define TAG_FAMILY  "FAMILY"
 #define TAG_TXLIST  "TXLIST"
 #define TAG_PROP_ANIMLIGHT "P$AnimLight"
@@ -733,17 +736,16 @@ typedef struct WorldRep {
     // NOTE: although WR uses LGWRWhiteLight, for simplicity we convert those
     //       to/from LGWRRGBLight when reading/writing our WorldRep.
     LGWRRGBLight *light_array;
-
     LGWRAnimLightToCell *animlight_to_cell_array;
-    // NOTE: csg_brush_index = (brface>>8)
-    //       face_index = (brface&0xff)
-    // TODO: does br=faces mean brush_polys? rename it?
     int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
     int32 *csg_brush_plane_count_array;             // number of planes, per brush
     LGWRCSGPlane *csg_brush_planes_array;           // all planes
     int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
     LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
 } WorldRep;
+
+#define CSG_BRFACE_GET_BRUSH_INDEX(brface) ((brface)>>8)
+#define CSG_BRFACE_GET_FACE_INDEX(brface) ((brface)&0xff)
 
 float32 _wr_decode_lightmap_scale(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -1286,6 +1288,17 @@ DBFile *dbfile_merge_worldreps(
     DBFile *dbfile2,
     LGWRPlane split_plane)
 {
+    // Sanity check: verify BRLIST is identical in both files.
+    // This is necessary because the WR csg_brush_plane* arrays depend on the
+    // brush list.
+    {
+        DBTagBlock *tagblock1 = dbfile_get_tag(dbfile1, TAG_BRLIST);
+        DBTagBlock *tagblock2 = dbfile_get_tag(dbfile2, TAG_BRLIST);
+        assert(tagblock1->size==tagblock2->size);
+        int result = memcmp(tagblock1->data, tagblock1->data, tagblock1->size);
+        assert_message(result==0, "BRLIST is different.");
+    }
+
     // Load both worldreps and merge them.
     WorldRep *wr1 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile1));
     WorldRep *wr2 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile2));
@@ -1325,6 +1338,7 @@ DBFile *dbfile_merge_worldreps(
            wr1_bsp_extraplane_end = wr1_bsp_extraplane_start+wr1_bsp_extraplane_count;
     uint32 wr2_bsp_extraplane_start = wr1_bsp_extraplane_end,
            wr2_bsp_extraplane_end = wr2_bsp_extraplane_start+wr2_bsp_extraplane_count;
+    UNUSED(wr2_bsp_extraplane_end);
     arrsetlen(wrm->bsp_extraplane_array, wrm_bsp_extraplane_count);
     wrm->bsp_extraplane_array[0] = split_plane;
     for (uint32 i=0, j=wr1_bsp_extraplane_start; i<wr1_bsp_extraplane_count; ++i, ++j)
@@ -1417,6 +1431,7 @@ DBFile *dbfile_merge_worldreps(
           wr1_dynamic_light_end = wr1_dynamic_light_start+wr1_dynamic_light_count;
     int16 wr2_dynamic_light_start = wr1_dynamic_light_end,
           wr2_dynamic_light_end = wr2_dynamic_light_start+wr2_dynamic_light_count;
+    UNUSED(wr2_dynamic_light_end);
     assert(wrm_total_light_count==( (int16)arrlen(wr1->light_array)
                                   + (int16)arrlen(wr2->light_array)
                                   - 1 ));
@@ -1458,6 +1473,192 @@ DBFile *dbfile_merge_worldreps(
         wrm->animlight_to_cell_array[j] = wr1->animlight_to_cell_array[i];
     for (uint16 i=0, j=wr2_animlighttocell_start; i<wr2_animlighttocell_count; ++i, ++j)
         wrm->animlight_to_cell_array[j] = wr2->animlight_to_cell_array[i];
+
+    // BUG: i have the merged data wrong. clicking faces selects the wrong brushes
+    //      (which suggests a brface or brush plane failure).
+    //      and then selecting a face and changing its texture doesnt update the
+    //      wr (which suggests a surfaceref failure, but might just be a knockon
+    //      effect).
+
+    // wrm csg_brfaces := [wr1 csg_brfaces] [wr2 csg_brfaces]
+    uint32 wr1_csg_brfaces_count = arrlenu32(wr1->csg_brfaces_array);
+    uint32 wr2_csg_brfaces_count = arrlenu32(wr2->csg_brfaces_array);
+    uint32 wrm_csg_brfaces_count = wr1_csg_brfaces_count+wr2_csg_brfaces_count;
+    uint32 wr1_csg_brfaces_start = 0,
+           wr1_csg_brfaces_end = wr1_csg_brfaces_start+wr1_csg_brfaces_count;
+    uint32 wr2_csg_brfaces_start = wr1_csg_brfaces_end,
+           wr2_csg_brfaces_end = wr2_csg_brfaces_start+wr2_csg_brfaces_count;
+    UNUSED(wr2_csg_brfaces_end);
+    arrsetlen(wrm->csg_brfaces_array, wrm_csg_brfaces_count);
+    for (uint32 i=0, j=wr1_csg_brfaces_start; i<wr1_csg_brfaces_count; ++i, ++j)
+        wrm->csg_brfaces_array[j] = wr1->csg_brfaces_array[i];
+    for (uint32 i=0, j=wr2_csg_brfaces_start; i<wr2_csg_brfaces_count; ++i, ++j)
+        wrm->csg_brfaces_array[j] = wr2->csg_brfaces_array[i];
+
+    // wrm csg_brush_plane_count := ...well...
+    //
+    // This array has one entry per brush. For simplicity, we would like that
+    // every brush be wholly in one or the other wr (or neither). But the
+    // reality is the csg_brush_plane* arrays can keep data from brushes that
+    // did not end up in the worldrep! So if one wr has a zero count for a
+    // brush, we keep the other one; if both have a nonzero count, then we just
+    // hope (and assert) that they are identical, and copy it through.
+    //
+    // Note that as a result, we need to interleave the csg_brush_planes arrays
+    // together, keeping each contiguous set of planes contiguous. So we do that
+    // here at the same time.
+    //
+    // Neither csg_brush_plane_count_array nor csg_brush_planes_arrays need any
+    // other fixup.
+    //
+    // Yes, "csg_brush_plane_count_count" would be confusing, so I am calling it
+    // "csg_brush_plane_sum_count" instead.
+
+    // csg_brush_plane_count arrays will be dovetailed together.
+    uint32 wr1_csg_brush_plane_sum_count = arrlenu32(wr1->csg_brush_plane_count_array);
+    uint32 wr2_csg_brush_plane_sum_count = arrlenu32(wr2->csg_brush_plane_count_array);
+    assert(wr1_csg_brush_plane_sum_count==wr2_csg_brush_plane_sum_count);
+    uint32 wrm_csg_brush_plane_sum_count = wr1_csg_brush_plane_sum_count;
+    uint32 wr1_csg_brush_planes_count = arrlenu32(wr1->csg_brush_planes_array);
+    uint32 wr2_csg_brush_planes_count = arrlenu32(wr2->csg_brush_planes_array);
+    // NOTE: We don't know in advance how many csg_brush_planes entries will be
+    //       in the result, so we append one by one instead of setting the
+    //       array length up in advance.
+    {
+        // we need cursors for the csg_brush_planes arrays
+        uint32 wr1_cursor = 0;
+        uint32 wr2_cursor = 0;
+        arrsetlen(wrm->csg_brush_plane_count_array, wrm_csg_brush_plane_sum_count);
+        for (uint32 i=0; i<wrm_csg_brush_plane_sum_count; ++i) {
+            int32 wr1_sum = wr1->csg_brush_plane_count_array[i];
+            int32 wr2_sum = wr2->csg_brush_plane_count_array[i];
+            if (wr1_sum!=0) {
+                if (wr2_sum!=0) {
+                    // Brush is in both wrs. Awkward.
+                    assert_format(wr1_sum==wr2_sum, "Brush %u has different csg planes in both wrs!", i);
+                    int result = memcmp(
+                        &wr1->csg_brush_planes_array[wr1_cursor],
+                        &wr2->csg_brush_planes_array[wr2_cursor],
+                        wr1_sum*sizeof(wr1->csg_brush_planes_array[0]));
+                    assert_format(result==0, "Brush %u has different csg planes in both wrs!", i);
+                    // If we didn't assert, then the brush planes are the same
+                    // in both wrs, so we fall through to copying it from wr1.
+                    // We advance the wr2 cursor past these planes.
+                    wr2_cursor += wr2_sum;
+                }
+                // Brush is in wr1. Append its planes.
+                wrm->csg_brush_plane_count_array[i] = wr1_sum;
+                for (int32 j=0; j<wr1_sum; ++j) {
+                    arrput(wrm->csg_brush_planes_array,
+                        wr1->csg_brush_planes_array[wr1_cursor++]);
+                }
+            } else {
+                // Brush is either in wr2, or not in either wr. Append its planes (if any).
+                wrm->csg_brush_plane_count_array[i] = wr2_sum;
+                for (int32 j=0; j<wr2_sum; ++j) {
+                    arrput(wrm->csg_brush_planes_array,
+                        wr2->csg_brush_planes_array[wr2_cursor++]);
+                }
+            }
+        }
+        // Make sure I havent fucked up, and we have copied all the planes:
+        assert(wr1_cursor==wr1_csg_brush_planes_count);
+        assert(wr2_cursor==wr2_csg_brush_planes_count);
+    }
+
+    // wrm csg_brush_surfaceref_count := ...well...
+    //
+    // This array has one entry per brush. For simplicity, we require that
+    // every brush be wholly in one or the other wr (or neither). Unlike the
+    // csg_brush_planes arrays (which can even include area brushes!), this
+    // only seems to keep the brushes that actually made it into the worldrep.
+    //
+    // Note that as a result, we need to interleave the csg_brush_surfacerefs arrays
+    // together, keeping each contiguous set of planes contiguous. So we do that
+    // here at the same time.
+    //
+    // Also, we need to fixup the cell ids here, because later we would not know
+    // which entries came from wr1 and which from wr2.
+    //
+    // Yes, "csg_brush_surfaceref_count_count" would be confusing, so I am calling it
+    // "csg_brush_surfaceref_sum_count" instead.
+
+    // csg_brush_surfaceref_count arrays will be dovetailed together.
+    uint32 wr1_csg_brush_surfaceref_sum_count = arrlenu32(wr1->csg_brush_surfaceref_count_array);
+    uint32 wr2_csg_brush_surfaceref_sum_count = arrlenu32(wr2->csg_brush_surfaceref_count_array);
+    assert(wr1_csg_brush_surfaceref_sum_count==wr2_csg_brush_surfaceref_sum_count);
+    uint32 wrm_csg_brush_surfaceref_sum_count = wr1_csg_brush_surfaceref_sum_count;
+    uint32 wr1_csg_brush_surfacerefs_count = arrlenu32(wr1->csg_brush_surfacerefs_array);
+    uint32 wr2_csg_brush_surfacerefs_count = arrlenu32(wr2->csg_brush_surfacerefs_array);
+    uint32 wrm_csg_brush_surfacerefs_count = wr1_csg_brush_surfacerefs_count+wr2_csg_brush_surfacerefs_count;
+    {
+        // we need cursors for the csg_brush_surfacerefs arrays
+        uint32 wr1_cursor = 0;
+        uint32 wr2_cursor = 0;
+        uint32 wrm_cursor = 0;
+        int16 wr1_cell_fixup = wr1_cell_start;
+        int16 wr2_cell_fixup = wr2_cell_start;
+        arrsetlen(wrm->csg_brush_surfaceref_count_array, wrm_csg_brush_surfaceref_sum_count);
+        arrsetlen(wrm->csg_brush_surfacerefs_array, wrm_csg_brush_surfacerefs_count);
+        for (uint32 i=0; i<wrm_csg_brush_surfaceref_sum_count; ++i) {
+            int32 wr1_sum = wr1->csg_brush_surfaceref_count_array[i];
+            int32 wr2_sum = wr2->csg_brush_surfaceref_count_array[i];
+            if (wr1_sum!=0) {
+                if (wr2_sum!=0) {
+                    // Brush is in both wrs. Slam that AZ-5!
+                    abort_format("Brush %u has different surfacerefs in both wrs!", i);
+                }
+                // Brush is in wr1. Append its surfacerefs. And fixup the cells.
+                wrm->csg_brush_surfaceref_count_array[i] = wr1_sum;
+                for (int32 j=0; j<wr1_sum; ++j) {
+                    wrm->csg_brush_surfacerefs_array[wrm_cursor]
+                        = wr1->csg_brush_surfacerefs_array[wr1_cursor++];
+                    wrm->csg_brush_surfacerefs_array[wrm_cursor].cell += wr1_cell_fixup;
+                    ++wrm_cursor;
+                }
+            } else {
+                // Brush is either in wr2, or not in either wr. Append its surfacerefs (if any).
+                wrm->csg_brush_surfaceref_count_array[i] = wr2_sum;
+                for (int32 j=0; j<wr2_sum; ++j) {
+                    wrm->csg_brush_surfacerefs_array[wrm_cursor]
+                        = wr2->csg_brush_surfacerefs_array[wr2_cursor++];
+                    wrm->csg_brush_surfacerefs_array[wrm_cursor].cell += wr2_cell_fixup;
+                    ++wrm_cursor;
+                }
+            }
+        }
+        // Make sure I havent fucked up, and we have copied all the surfacerefs:
+        assert(wr1_cursor==wr1_csg_brush_surfacerefs_count);
+        assert(wr2_cursor==wr2_csg_brush_surfacerefs_count);
+        assert(wrm_cursor==wrm_csg_brush_surfacerefs_count);
+    }
+
+/*
+    // wrm xxxxxx := [wr1 xxxxxx] [wr2 xxxxxx]
+    uint32 wr1_xxxxxx_count = arrlenu32(wr1->xxxxxx_array);
+    uint32 wr2_xxxxxx_count = arrlenu32(wr2->xxxxxx_array);
+    assert(wr1_xxxxxx_count==wr1_cell_count);
+    assert(wr2_xxxxxx_count==wr2_cell_count);
+    uint32 wrm_xxxxxx_count = wr1_xxxxxx_count+wr2_xxxxxx_count;
+    uint32 wr1_xxxxxx_start = 0;
+    uint32 wr2_xxxxxx_start = wr1_xxxxxx_start+wr1_xxxxxx_count;
+    arrsetlen(wrm->xxxxxx_array, wrm_xxxxxx_count);
+    for (uint32 i=0, j=wr1_xxxxxx_start; i<wr1_xxxxxx_count; ++i, ++j)
+        wrm->xxxxxx_array[j] = wr1->xxxxxx_array[i];
+    for (uint32 i=0, j=wr2_xxxxxx_start; i<wr2_xxxxxx_count; ++i, ++j)
+        wrm->xxxxxx_array[j] = wr2->xxxxxx_array[i];
+*/
+    /*
+    OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
+          maybe dromed (old dromed at least) needs it for rendering in
+          the editor viewport?
+    */
+    // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
+    // int32 *csg_brush_plane_count_array;             // number of planes, per brush
+    // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
+    // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
+    // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
+
 
     // Fixup cells:
     for (int16 i=0; i<wrm_cell_count; ++i) {
@@ -1579,17 +1780,6 @@ DBFile *dbfile_merge_worldreps(
         wrm->animlight_to_cell_array[i].cell_index += cell_fixup;
     }
 
-    /*
-    OKAY: i think i _do_ need to copy the csg_* stuff. probably. seems like
-          maybe dromed (old dromed at least) needs it for rendering in
-          the editor viewport?
-    */
-    // int32 *csg_brfaces_array;                       // one brface per renderpoly, per cell
-    // int32 *csg_brush_plane_count_array;             // number of planes, per brush
-    // LGWRCSGPlane *csg_brush_planes_array;           // all brush planes
-    // int32 *csg_brush_surfaceref_count_array;        // number of surfacerefs, per brush
-    // LGWRCSGSurfaceRef *csg_brush_surfacerefs_array; // all surfacerefs
-
     // merged AnimLight props := ...well...
     //
     // AnimLight props are stored per-object; since the objects in both input
@@ -1600,7 +1790,7 @@ DBFile *dbfile_merge_worldreps(
     // cells. If there are any AnimLights that reached cells in both wr1 and
     // wr2, there isn't a simple way to deal with that, so we just disallow it.
     //
-    // NOTE: because the two arrays are being merged and not concatenated,
+    // NOTE: because the two arrays are being dovetailed and not concatenated,
     //       we also have to apply fixups right now, because later we won't
     //       know which AnimLight comes from dbfile1 and which from dbfile2.
     uint32 animlight_version_minor;
@@ -2659,7 +2849,9 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brfaces_array); i<iend; ++i) {
         int32 v = wr->csg_brfaces_array[i];
-        printf("CSG_BRFACES %u: 0x%08x\n", i, v);
+        int32 brush = CSG_BRFACE_GET_BRUSH_INDEX(v);
+        int32 face = CSG_BRFACE_GET_FACE_INDEX(v);
+        printf("CSG_BRFACES %u: brush %d face %d (0x%08x)\n", i, brush, face, v);
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
         int32 v = wr->csg_brush_plane_count_array[i];
