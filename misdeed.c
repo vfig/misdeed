@@ -1123,7 +1123,7 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     return wr;
 }
 
-void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
+void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     assert(tagblock->data==NULL);
     // We write to a 256MB temporary buffer, and at the end we malloc
     // tagblock->data and copy into that. Its not the most efficient
@@ -1251,29 +1251,21 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr, int include_csg) {
     MEM_WRITE(num_animlight_to_cell, pwrite);
     MEM_WRITE_ARRAY(wr->animlight_to_cell_array, pwrite);
 
-    if (include_csg) {
-        uint32 csg_cell_count = arrlenu32(wr->cell_array);
-        MEM_WRITE(csg_cell_count, pwrite);
-        dump("csg_cell_count: %lu\n", csg_cell_count);
-        uint32 csg_brfaces_count = arrlenu32(wr->csg_brfaces_array);
-        dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
-        MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
-        uint32 csg_brush_count = arrlenu32(wr->csg_brush_plane_count_array);
-        MEM_WRITE(csg_brush_count, pwrite);
-        dump("csg_brush_count: %lu\n", csg_brush_count);
-        MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
-        uint32 csg_brush_plane_total_count = arrlenu32(wr->csg_brush_planes_array);
-        dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
-        MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
-        MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
-        MEM_WRITE_ARRAY(wr->csg_brush_surfacerefs_array, pwrite);
-    } else {
-        uint32 csg_cell_count = 0;
-        MEM_WRITE(csg_cell_count, pwrite);
-        dump("csg_cell_count: %lu\n", csg_cell_count);
-        uint32 csg_brush_count = 0;
-        MEM_WRITE(csg_brush_count, pwrite);
-    }
+    uint32 csg_cell_count = arrlenu32(wr->cell_array);
+    MEM_WRITE(csg_cell_count, pwrite);
+    dump("csg_cell_count: %lu\n", csg_cell_count);
+    uint32 csg_brfaces_count = arrlenu32(wr->csg_brfaces_array);
+    dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
+    MEM_WRITE_ARRAY(wr->csg_brfaces_array, pwrite);
+    uint32 csg_brush_count = arrlenu32(wr->csg_brush_plane_count_array);
+    MEM_WRITE(csg_brush_count, pwrite);
+    dump("csg_brush_count: %lu\n", csg_brush_count);
+    MEM_WRITE_ARRAY(wr->csg_brush_plane_count_array, pwrite);
+    uint32 csg_brush_plane_total_count = arrlenu32(wr->csg_brush_planes_array);
+    dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
+    MEM_WRITE_ARRAY(wr->csg_brush_planes_array, pwrite);
+    MEM_WRITE_ARRAY(wr->csg_brush_surfaceref_count_array, pwrite);
+    MEM_WRITE_ARRAY(wr->csg_brush_surfacerefs_array, pwrite);
 
     uint32 size = (uint32)(pwrite-(char *)buffer);
     assert(size<=buffer_size);
@@ -1898,7 +1890,7 @@ DBFile *dbfile_merge_worldreps(
     // Write the merged worldrep to the output.
     {
         DBTagBlock tagblock = {0};
-        wr_save_to_tagblock(&tagblock, wrm, 0);
+        wr_save_to_tagblock(&tagblock, wrm);
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
@@ -2910,7 +2902,7 @@ int do_test_worldrep(int argc, char **argv, struct command *cmd) {
     dump("\n");
 
     DBTagBlock wr_tagblock2 = {0};
-    wr_save_to_tagblock(&wr_tagblock2, wr, 1);
+    wr_save_to_tagblock(&wr_tagblock2, wr);
     assert(wr_tagblock->size==wr_tagblock2.size);
     // BUG: this memcmp() will fail because we don't preserve the light_this
     //      records (because it would be worthless to do so!). But then how do
