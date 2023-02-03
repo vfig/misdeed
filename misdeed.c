@@ -96,7 +96,8 @@ void dump(char *fmt, ...) {
 
 #define UNUSED(x) (void)(x)
 
-#define MEM_ZERO(buf, size) memset(buf, 0, size)
+#define MEM_ZERO_SIZE(buf, size) memset(buf, 0, size)
+#define MEM_ZERO(var) MEM_ZERO_SIZE(&var, sizeof(var))
 
 #define MEM_READ_SIZE(buf, size, p) \
     do { \
@@ -144,6 +145,10 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 typedef struct LGVector {
     float32 x, y, z;
 } LGVector;
+
+typedef struct LGAngleVector {
+    uint16 x, y, z;
+} LGAngleVector;
 
 typedef struct LGDBVersion {
     uint32 major;
@@ -353,6 +358,154 @@ typedef struct LGWRCSGSurfaceRef {
     uint8 brush_face;
     int16 vertex;
 } LGWRCSGSurfaceRef;
+
+#define LGBRLIST_FACE_COUNT_MAX_OLDDARK 12
+#define LGBRLIST_FACE_COUNT_MAX_NEWDARK 28
+
+typedef enum LGBrushType {
+    BRTYPE_TERRAIN = 0,
+    BRTYPE_LIGHT = 1,
+    BRTYPE_AREA = 2,
+    BRTYPE_OBJECT = 3,
+    BRTYPE_FLOW = 4,
+    BRTYPE_ROOM = 5,
+
+    BRTYPE_INVALID = -1,
+} LGBrushType;
+
+typedef enum LGBrushShape {
+    BRSHAPE_CUBE = 0,
+    BRSHAPE_CYLINDER = 1,
+    BRSHAPE_PYRAMID = 2,
+    BRSHAPE_APEX_PYRAMID = 3,
+    BRSHAPE_DODECAHEDRON = 4,
+
+    BRSHAPE_INVALID = -1,
+} LGBrushShape;
+
+typedef enum LGBrushAlign {
+    BRALIGN_BY_VERTEX = 0,
+    BRALIGN_BY_FACE = 1,
+} LGBrushAlign;
+
+static inline LGBrushType _lgbrush_get_type(int32 media) {
+    if (media>=0)
+        return BRTYPE_TERRAIN;
+    else if (media>=-BRTYPE_ROOM && media<=-BRTYPE_LIGHT)
+        return -media;
+    abort_format("Unknown brush type %d", media);
+    return BRTYPE_INVALID;
+}
+
+static inline LGBrushShape _lgbrush_get_shape(int32 primal) {
+    int type = (primal>>9);
+    int sides = (primal&0xff);
+    switch (type) {
+    case 0:
+        switch (sides) {
+        case 1: return BRSHAPE_CUBE;
+        case 6: return BRSHAPE_DODECAHEDRON; // TODO: i think!!
+        }
+        break;
+    case 1: return BRSHAPE_CYLINDER;
+    case 2: return BRSHAPE_PYRAMID;
+    case 3: return BRSHAPE_APEX_PYRAMID;
+    }
+    abort_format("Unknown terrain primal %d (0x%08x)", primal, primal);
+    return BRSHAPE_INVALID;
+}
+
+static inline LGBrushAlign _lgbrush_get_align(int32 primal) {
+    return ((primal>>8)&1);
+}
+
+static inline int _lgbrush_get_sides(int32 primal) {
+    int type = (primal>>9);
+    int sides = (primal&0xff);
+    switch (type) {
+    case 0:
+        // cubes, dodecahedrons don't have variable side counts.
+        return 0;
+    case 1:
+    case 2:
+    case 3:
+        return sides+3;
+    }
+    return 0;
+}
+
+static inline int _lgbrush_get_face_count(int32 media, uint8 num_faces) {
+    if (media>=0)
+        return num_faces;
+    else
+        return 0;
+}
+
+#define LGBRUSH_GET_TYPE(b) _lgbrush_get_type((b).media)
+#define LGBRUSH_GET_TERR_SHAPE(b) _lgbrush_get_shape((b).terr_primal)
+#define LGBRUSH_GET_TERR_SIDES(b) _lgbrush_get_sides((b).terr_primal)
+#define LGBRUSH_GET_ALIGN(b) _lgbrush_get_align((b).terr_primal)
+#define LGBRUSH_GET_FACE_COUNT(b) _lgbrush_get_face_count((b).media, (b).terr_num_faces)
+#define LGBRUSH_GET_MEDIUM(b) _lgbrush_get_medium((b).media)
+
+typedef struct LGBRLISTFace {
+    int16 tx_id;
+    uint16 rot;
+    int16 scale;
+    uint16 x;
+    uint16 y;
+} LGBRLISTFace;
+
+typedef struct LGBRLISTGrid {
+    float32 line_spacing;
+    LGVector phase_shift;   // Unused by Dromed
+    LGAngleVector orientation;   // Unused by Dromed
+    bool8 grid_enabled;
+} LGBRLISTGrid;
+
+typedef struct LGBRLISTBrush {
+    int16 br_id;
+    int16 timestamp;
+    union {
+        int32 terr_primal;
+        int32 light_number; // TODO: ??? is this another index into wr we need to fixup? D:
+        int32 area_unknown0; // TODO: is this anything?
+        int32 obj_id;
+        int32 flow_unknown0; // TODO: is this anything?
+        int32 room_archetype;
+    };
+    union {
+        int16 terr_tx_id;
+        int16 light_unknown1; // TODO: is this anything?
+        int16 area_active;
+        int16 obj_unknown1; // TODO: is this anything?
+        int16 flow_gid; // TODO: what is a gid? (this is from pytaffers)
+        int16 room_number; // TODO: what does this mean?
+    };
+    int8 media;
+    int8 flags;
+    LGVector pos;
+    LGVector sz;
+    LGAngleVector ang;
+    int16 cur_face;                 // -- 44 bytes
+    LGBRLISTGrid grid;
+    union {
+        uint8 terr_num_faces;
+        uint8 light_type;
+        uint8 area_unknown2; // TODO: is this anything?
+        uint8 obj_unknown2; // TODO: is this anything?
+        uint8 flow_unknown2; // TODO: is this anything?
+        uint8 room_unknown2; // TODO: is this anything?
+    };
+    int8 edge;
+    int8 point;
+    int8 use_flg;
+    int8 group_id;
+    int32 pad0;
+    // NOTE: On disk only num_faces of these are stored. But we keep the full
+    //       array here so that we can make a flat array of LGBRLISTBrush.
+    LGBRLISTFace faces[LGBRLIST_FACE_COUNT_MAX_NEWDARK];
+} LGBRLISTBrush;
 
 // NOTE: Two additional leading slots are used for sky and (default) water;
 //       these are not included in LGFAMILY_COUNT_MAX_*.
@@ -848,7 +1001,7 @@ void wr_free_cell(WorldRepCell *cell) {
 
 void *wr_read_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdata) {
     char *pread = (char *)pdata;
-    MEM_ZERO(cell, sizeof(*cell));
+    MEM_ZERO_SIZE(cell, sizeof(*cell));
     cell->is_ext = is_ext;
     LGWRCellHeader header;
     MEM_READ(header, pread);
@@ -915,7 +1068,7 @@ void *wr_write_cell(WorldRepCell *cell, int is_ext, int lightmap_bpp, void *pdat
 }
 
 void wr_copy_cell(WorldRepCell *out_cell, WorldRepCell *cell) {
-    MEM_ZERO(out_cell, sizeof(*out_cell));
+    MEM_ZERO_SIZE(out_cell, sizeof(*out_cell));
     out_cell->is_ext = cell->is_ext;
     out_cell->header = cell->header;
     arrcopy(out_cell->vertex_array, cell->vertex_array);
@@ -1917,6 +2070,32 @@ DBFile *dbfile_merge_worldreps(
     return dbfile_out;
 }
 
+/** BRLIST stuff */
+
+LGBRLISTBrush *brlist_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tagblock->version.major==1 && tagblock->version.minor==0);
+    char *pread = tagblock->data;
+    char *pend = pread+tagblock->size;
+
+    LGBRLISTBrush *brushes = NULL;
+    LGBRLISTBrush brush;
+
+    size_t bare_size = sizeof(brush)-sizeof(brush.faces);
+    size_t face_size = sizeof(brush.faces[0]);
+    while (pread<pend) {
+        // Read one brush
+        MEM_ZERO(brush);
+        MEM_READ_SIZE(&brush, bare_size, pread);
+        int face_count = LGBRUSH_GET_FACE_COUNT(brush);
+        if (face_count>0)
+            MEM_READ_SIZE(brush.faces, face_count*face_size, pread);
+        arrput(brushes, brush);
+    }
+    assert(pread==pend);
+
+    return brushes;
+}
+
 /** Family stuff */
 
 typedef struct FamilyList {
@@ -2871,6 +3050,68 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_brlist(int argc, char **argv, struct command *cmd) {
+    if (argc!=1) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_BRLIST);
+    LGBRLISTBrush *brushes = brlist_load_from_tagblock(tagblock);
+
+    static const char *brush_type_s[] = {
+        "terrain",
+        "light",
+        "area",
+        "object",
+        "flow",
+        "room",
+    };
+    static const char *brush_shape_s[] = {
+        "cube",
+        "cylinder",
+        "pyramid",
+        "apex pyramid",
+        "dodecahedron",
+    };
+    static const char *brush_align_s[] = {
+        "by sides",
+        "by vertices",
+    };
+
+    for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
+        LGBRLISTBrush br = brushes[i];
+        printf("Brush %u:\n", i);
+        int type = LGBRUSH_GET_TYPE(br);
+        assert(type!=BRTYPE_INVALID);
+        printf("\ttype: %d %s\n", type, brush_type_s[type]);
+        if (type==BRTYPE_TERRAIN) {
+            int shape = LGBRUSH_GET_TERR_SHAPE(br);
+            assert(shape!=BRSHAPE_INVALID);
+            printf("\tshape: %d %s\n", type, brush_shape_s[shape]);
+            int sides = LGBRUSH_GET_TERR_SIDES(br);
+            printf("\tsides: %d\n", sides);
+        }
+        int align = LGBRUSH_GET_ALIGN(br);
+        printf("\talign: %d %s\n", type, brush_align_s[align]);
+        printf("\tposition: %f %f %f\n", br.pos.x, br.pos.y, br.pos.z);
+        printf("\tfacing: %04x %04x %04x\n", br.ang.x, br.ang.y, br.ang.z);
+        printf("\tsize: %f %f %f\n", br.sz.x, br.sz.y, br.sz.z);
+        // TODO: other fields!
+        int face_count = LGBRUSH_GET_FACE_COUNT(br);
+        printf("\tface_count: %d\n", face_count);
+        for (uint32 j=0, jend=face_count; j<jend; ++j) {
+            LGBRLISTFace *face = &br.faces[j];
+            printf("\t\t%u: tex %d\n", j, (int)face->tx_id);
+            // TODO: other face details!
+        }
+    }
+
+    arrfree(brushes);
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
 int do_bsp_sanity_check(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
@@ -3040,6 +3281,7 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "top.mis bottom.mis -o out.mis",  "Merge two worldreps." },
+    { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
     { "dump_wr", do_dump_wr,                        "file.mis",             "dump the WR to stdout." },
