@@ -244,7 +244,7 @@ typedef struct LGWRRenderPoly {
     uint16 v_base;
     uint8 texture_id;
     uint8 texture_anchor;
-    uint16 cached_surface;
+    uint16 cached_surface;  // Ignore this value; the engine zeroes it on WR load.
     float32 texture_mag;
     LGVector center;
 } LGWRRenderPoly;
@@ -255,7 +255,7 @@ typedef struct LGWREXTRenderPoly {
     float32 u_base;         // Changed in WREXT
     float32 v_base;         // Changed in WREXT
     uint16 texture_id;      // Changed in WREXT (texture_anchor removed)
-    uint16 cached_surface;  // TODO: jk has this as texture_anchor!
+    uint16 cached_surface;  // TODO: jk has this as texture_anchor! which is it?
     float32 texture_mag;
     LGVector center;
 } LGWREXTRenderPoly;
@@ -351,11 +351,11 @@ typedef struct LGWRCSGPlane {
     float64 d;       // Plane equation: ax + by + cz + d = 0
 } LGWRCSGPlane;
 
-// TODO: is this different in EXT? check PinkDot's info
 typedef struct LGWRCSGSurfaceRef {
     int32 cell;
-    uint8 surface;
-    uint8 brush_face;
+    uint8 surface;      // Index of cell's render poly.
+    uint8 brush_face;   // Index of brush face (brush id is known from your
+                        //     position in csg_brush_surfaceref_count_array).
     int16 vertex;
 } LGWRCSGSurfaceRef;
 
@@ -899,6 +899,9 @@ typedef struct WorldRep {
 
 #define CSG_BRFACE_GET_BRUSH_INDEX(brface) ((brface)>>8)
 #define CSG_BRFACE_GET_FACE_INDEX(brface) ((brface)&0xff)
+#define CSG_BRFACE(br,face) (((br)<<8)|((face)&0xff))
+
+int16 brlist_get_id_max(DBFile *dbfile);
 
 float32 _wr_decode_lightmap_scale(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -1443,6 +1446,37 @@ DBFile *dbfile_merge_worldreps(
         int result = memcmp(tagblock1->data, tagblock1->data, tagblock1->size);
         assert_message(result==0, "BRLIST is different.");
     }
+    // NOTE: When portalizing, Dromed inserts a new "blockable" brush for every
+    //       visibility-blocking door, so that it can guarantee portals that
+    //       can be closed when the door is closed. These brushes are appended
+    //       to the brush list, then deleted after portalization completes.
+    //       However, the "next available brush id" is not reset.
+    //
+    //       (You can see this effect if you open a .mis with doors, select the
+    //       last brush, i.e. the highest id -- brush ids are shown below the
+    //       "Time" field -- then create a new brush. Its id will be highest+1
+    //       as expected. However if you portalize before creating the new
+    //       brush, the new brush's id will be highest+X+1, where X is the
+    //       number of door-blocking brushes that were made. This difference
+    //       even compounds with subsequent portalizations.)
+    //
+    //       This doesn't affect any ordinary editor functions, nor the BRLIST
+    //       at all; but it does affect csg_brush_plane_count_array and
+    //       csg_brush_surfaceref_count_array, each of which are sized to be
+    //       indexable by brush id. The result is that these arrays can
+    //       contain many "phantom" entries after the highest brush id that is
+    //       actually in use; and there is no sensible way to merge these
+    //       phantom entries. So here we truncate these arrays (and the two
+    //       related arrays) based on the actual highest brush id in use (which
+    //       we require to be the same for both dbfiles), so that these csg
+    //       arrays can be merged.
+    //
+    //       Note that non-terrain brushes, or unused brush ids due to deleted
+    //       brushes might also conribute phantom entries in the lower parts
+    //       of the array, but these will not matter.
+    //
+    int16 br_id_max = brlist_get_id_max(dbfile1);
+    assert(brlist_get_id_max(dbfile2)==br_id_max);
 
     // Load both worldreps and merge them.
     WorldRep *wr1 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile1));
@@ -1619,12 +1653,6 @@ DBFile *dbfile_merge_worldreps(
     for (uint16 i=0, j=wr2_animlighttocell_start; i<wr2_animlighttocell_count; ++i, ++j)
         wrm->animlight_to_cell_array[j] = wr2->animlight_to_cell_array[i];
 
-    // BUG: i have the merged data wrong. clicking faces selects the wrong brushes
-    //      (which suggests a brface or brush plane failure).
-    //      and then selecting a face and changing its texture doesnt update the
-    //      wr (which suggests a surfaceref failure, but might just be a knockon
-    //      effect).
-
     // wrm csg_brfaces := [wr1 csg_brfaces] [wr2 csg_brfaces]
     uint32 wr1_csg_brfaces_count = arrlenu32(wr1->csg_brfaces_array);
     uint32 wr2_csg_brfaces_count = arrlenu32(wr2->csg_brfaces_array);
@@ -1639,6 +1667,20 @@ DBFile *dbfile_merge_worldreps(
         wrm->csg_brfaces_array[j] = wr1->csg_brfaces_array[i];
     for (uint32 i=0, j=wr2_csg_brfaces_start; i<wr2_csg_brfaces_count; ++i, ++j)
         wrm->csg_brfaces_array[j] = wr2->csg_brfaces_array[i];
+    // NOTE: it is possible to end up with brush faces from door blockables
+    //       where the brush was just distant enough from surrounding terrain
+    //       that it made a face. that is always an error (it will be a jorge
+    //       face); but for our purposes it would create a csg_brushes array
+    //       index that is out of bounds (because we truncate to actual brushes
+    //       for sanity when merging). so if we find any such entries in the
+    //       brfaces array, just
+    for (uint32 i=0; i<wrm_csg_brfaces_count; ++i) {
+        int32 brface = wrm->csg_brfaces_array[i];
+        int32 br_id = CSG_BRFACE_GET_BRUSH_INDEX(brface);
+        assert_format(br_id<=br_id_max,
+            "brface %u has invalid brush id %d (do you have a door blockable creating faces?)",
+            i, br_id);
+    }
 
     // wrm csg_brush_plane_count := ...well...
     //
@@ -1662,10 +1704,14 @@ DBFile *dbfile_merge_worldreps(
     // csg_brush_plane_count arrays will be dovetailed together.
     uint32 wr1_csg_brush_plane_sum_count = arrlenu32(wr1->csg_brush_plane_count_array);
     uint32 wr2_csg_brush_plane_sum_count = arrlenu32(wr2->csg_brush_plane_count_array);
+    // NOTE: When merging, we just truncate both arrays to only cover brush ids
+    //       actually in use (see discussion at br_id_max above).
+    if (wr1_csg_brush_plane_sum_count>(uint32)br_id_max)
+        wr1_csg_brush_plane_sum_count = (uint32)br_id_max;
+    if (wr2_csg_brush_plane_sum_count>(uint32)br_id_max)
+        wr2_csg_brush_plane_sum_count = (uint32)br_id_max;
     assert(wr1_csg_brush_plane_sum_count==wr2_csg_brush_plane_sum_count);
     uint32 wrm_csg_brush_plane_sum_count = wr1_csg_brush_plane_sum_count;
-    uint32 wr1_csg_brush_planes_count = arrlenu32(wr1->csg_brush_planes_array);
-    uint32 wr2_csg_brush_planes_count = arrlenu32(wr2->csg_brush_planes_array);
     // NOTE: We don't know in advance how many csg_brush_planes entries will be
     //       in the result, so we append one by one instead of setting the
     //       array length up in advance.
@@ -1680,6 +1726,10 @@ DBFile *dbfile_merge_worldreps(
             if (wr1_sum!=0) {
                 if (wr2_sum!=0) {
                     // Brush is in both wrs. Awkward.
+                    // NOTE: in fact this is most likely not because it is in
+                    //       both wrs, but because the csg code is sloppy about
+                    //       clearing its memory, and the csg brush array is
+                    //       persistent during a single dromed run.
                     assert_format(wr1_sum==wr2_sum, "Brush %u has different csg planes in both wrs!", i);
                     int result = memcmp(
                         &wr1->csg_brush_planes_array[wr1_cursor],
@@ -1706,9 +1756,6 @@ DBFile *dbfile_merge_worldreps(
                 }
             }
         }
-        // Make sure I havent fucked up, and we have copied all the planes:
-        assert(wr1_cursor==wr1_csg_brush_planes_count);
-        assert(wr2_cursor==wr2_csg_brush_planes_count);
     }
 
     // wrm csg_brush_surfaceref_count := ...well...
@@ -1731,11 +1778,17 @@ DBFile *dbfile_merge_worldreps(
     // csg_brush_surfaceref_count arrays will be dovetailed together.
     uint32 wr1_csg_brush_surfaceref_sum_count = arrlenu32(wr1->csg_brush_surfaceref_count_array);
     uint32 wr2_csg_brush_surfaceref_sum_count = arrlenu32(wr2->csg_brush_surfaceref_count_array);
+    // NOTE: When merging, we just truncate both arrays to only cover brush ids
+    //       actually in use (see discussion at br_id_max above).
+    if (wr1_csg_brush_surfaceref_sum_count>(uint32)br_id_max)
+        wr1_csg_brush_surfaceref_sum_count = (uint32)br_id_max;
+    if (wr2_csg_brush_surfaceref_sum_count>(uint32)br_id_max)
+        wr2_csg_brush_surfaceref_sum_count = (uint32)br_id_max;
     assert(wr1_csg_brush_surfaceref_sum_count==wr2_csg_brush_surfaceref_sum_count);
     uint32 wrm_csg_brush_surfaceref_sum_count = wr1_csg_brush_surfaceref_sum_count;
-    uint32 wr1_csg_brush_surfacerefs_count = arrlenu32(wr1->csg_brush_surfacerefs_array);
-    uint32 wr2_csg_brush_surfacerefs_count = arrlenu32(wr2->csg_brush_surfacerefs_array);
-    uint32 wrm_csg_brush_surfacerefs_count = wr1_csg_brush_surfacerefs_count+wr2_csg_brush_surfacerefs_count;
+    // NOTE: We don't know in advance how many csg_brush_surfacerefs entries
+    //       will be in the result, so we append one by one instead of setting
+    //       the array length up in advance.
     {
         // we need cursors for the csg_brush_surfacerefs arrays
         uint32 wr1_cursor = 0;
@@ -1744,7 +1797,6 @@ DBFile *dbfile_merge_worldreps(
         int16 wr1_cell_fixup = wr1_cell_start;
         int16 wr2_cell_fixup = wr2_cell_start;
         arrsetlen(wrm->csg_brush_surfaceref_count_array, wrm_csg_brush_surfaceref_sum_count);
-        arrsetlen(wrm->csg_brush_surfacerefs_array, wrm_csg_brush_surfacerefs_count);
         for (uint32 i=0; i<wrm_csg_brush_surfaceref_sum_count; ++i) {
             int32 wr1_sum = wr1->csg_brush_surfaceref_count_array[i];
             int32 wr2_sum = wr2->csg_brush_surfaceref_count_array[i];
@@ -1756,8 +1808,8 @@ DBFile *dbfile_merge_worldreps(
                 // Brush is in wr1. Append its surfacerefs. And fixup the cells.
                 wrm->csg_brush_surfaceref_count_array[i] = wr1_sum;
                 for (int32 j=0; j<wr1_sum; ++j) {
-                    wrm->csg_brush_surfacerefs_array[wrm_cursor]
-                        = wr1->csg_brush_surfacerefs_array[wr1_cursor++];
+                    arrput(wrm->csg_brush_surfacerefs_array,
+                        wr1->csg_brush_surfacerefs_array[wr1_cursor++]);
                     wrm->csg_brush_surfacerefs_array[wrm_cursor].cell += wr1_cell_fixup;
                     ++wrm_cursor;
                 }
@@ -1765,17 +1817,13 @@ DBFile *dbfile_merge_worldreps(
                 // Brush is either in wr2, or not in either wr. Append its surfacerefs (if any).
                 wrm->csg_brush_surfaceref_count_array[i] = wr2_sum;
                 for (int32 j=0; j<wr2_sum; ++j) {
-                    wrm->csg_brush_surfacerefs_array[wrm_cursor]
-                        = wr2->csg_brush_surfacerefs_array[wr2_cursor++];
+                    arrput(wrm->csg_brush_surfacerefs_array,
+                        wr2->csg_brush_surfacerefs_array[wr2_cursor++]);
                     wrm->csg_brush_surfacerefs_array[wrm_cursor].cell += wr2_cell_fixup;
                     ++wrm_cursor;
                 }
             }
         }
-        // Make sure I havent fucked up, and we have copied all the surfacerefs:
-        assert(wr1_cursor==wr1_csg_brush_surfacerefs_count);
-        assert(wr2_cursor==wr2_csg_brush_surfacerefs_count);
-        assert(wrm_cursor==wrm_csg_brush_surfacerefs_count);
     }
 
 /*
@@ -2095,6 +2143,20 @@ LGBRLISTBrush *brlist_load_from_tagblock(DBTagBlock *tagblock) {
 
     return brushes;
 }
+
+int16 brlist_get_id_max(DBFile *dbfile) {
+    int16 br_id_max = -1;
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_BRLIST);
+    LGBRLISTBrush *brushes = brlist_load_from_tagblock(tagblock);
+    for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
+        int16 br_id = brushes[i].br_id;
+        if (br_id>br_id_max)
+            br_id_max = br_id;
+    }
+    arrfree(brushes);
+    return br_id_max;
+}
+
 
 /** Family stuff */
 
@@ -2879,6 +2941,7 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+    int16 br_id_max = brlist_get_id_max(dbfile);
 
     const char *format_name[] = { "WR", "WRRGB", "WREXT" };
     printf("format: %s\n", format_name[wr->format]);
@@ -3022,10 +3085,14 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
         int32 v = wr->csg_brfaces_array[i];
         int32 brush = CSG_BRFACE_GET_BRUSH_INDEX(v);
         int32 face = CSG_BRFACE_GET_FACE_INDEX(v);
+        if (brush>br_id_max)
+            printf("!!!! excessive brush id !!!! ");
         printf("CSG_BRFACES %u: brush %d face %d (0x%08x)\n", i, brush, face, v);
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
         int32 v = wr->csg_brush_plane_count_array[i];
+        if ((int32)i>br_id_max)
+            printf("*"); // excessive br_id
         printf("CSG_BRUSH_PLANE_COUNT %u: %d\n", i, v);
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_planes_array); i<iend; ++i) {
@@ -3034,6 +3101,8 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
         int32 v = wr->csg_brush_surfaceref_count_array[i];
+        if ((int32)i>br_id_max)
+            printf("*"); // excessive br_id
         printf("CSG_BRUSH_SURFACEREF_COUNT %u: %d\n", i, v);
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfacerefs_array); i<iend; ++i) {
