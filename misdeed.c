@@ -844,6 +844,44 @@ DBTagBlock *dbfile_get_wr_tagblock(DBFile *dbfile) {
     return tagblock;
 }
 
+/** Vector math conveniences */
+
+LGVector vadd(LGVector a, LGVector b) {
+    LGVector o;
+    o.x = a.x+b.x;
+    o.y = a.y+b.y;
+    o.z = a.z+b.z;
+    return o;
+}
+
+LGVector vneg(LGVector a) {
+    LGVector o;
+    o.x = -a.x;
+    o.y = -a.y;
+    o.z = -a.z;
+    return o;
+}
+
+LGVector vmulf(LGVector a, float b) {
+    LGVector o;
+    o.x = a.x*b;
+    o.y = a.y*b;
+    o.z = a.z*b;
+    return o;
+}
+
+float vdot(LGVector a, LGVector b) {
+    return a.x*b.x + a.y*b.y + a.z*b.z;
+}
+
+LGVector vcross(LGVector a, LGVector b) {
+    LGVector o;
+    o.x = a.y*b.z - a.z*b.y;
+    o.y = a.z*b.x - a.x*b.z;
+    o.z = a.x*b.y - a.y*b.x;
+    return o;
+}
+
 /** WorldRep stuff */
 
 typedef struct WorldRepCell {
@@ -2424,15 +2462,25 @@ struct command {
 int do_help(int argc, char **argv, struct command *cmd);
 
 int do_merge(int argc, char **argv, struct command *cmd) {
-    if (argc!=4
-    || strcmp(argv[2], "-o")!=0) {
+    // top.mis bottom.mis a b c d -o out.mis
+    // double strtod(const char *nptr, char **endptr);
+    if (argc!=8
+    || strcmp(argv[6], "-o")!=0) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
 
     char *in_filename[2];
     for (int i=0; i<2; ++i)
         in_filename[i] = argv[i];
-    char *out_filename = argv[3];
+    LGWRPlane split_plane;
+    split_plane.normal.x = (float)atof(argv[2]);
+    split_plane.normal.y = (float)atof(argv[3]);
+    split_plane.normal.z = (float)atof(argv[4]);
+    split_plane.distance = (float)atof(argv[5]);
+    if (sqrt(vdot(split_plane.normal, split_plane.normal))<0.01) {
+        abort_message("Plane normal looks messed up!");
+    }
+    char *out_filename = argv[7];
 
     dump("Files:");
     for (int i=0; i<2; ++i)
@@ -2528,11 +2576,6 @@ int do_merge(int argc, char **argv, struct command *cmd) {
     printf("\n");
     abort_message("---- TEMP: stopping here ----");
 #endif
-
-    // TODO: make the split plane a parameter.
-    LGWRPlane split_plane;
-    split_plane.normal = (LGVector){ 0.0, 0.0, 1.0 };
-    split_plane.distance = 0.0;
 
     DBFile *dbfile_out = dbfile_merge_worldreps(dbfile[0], dbfile[1], split_plane);
     dbfile_save(dbfile_out, out_filename);
@@ -2709,42 +2752,6 @@ void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
         }
     }
     fprintf(f, "}\n");
-}
-
-LGVector vadd(LGVector a, LGVector b) {
-    LGVector o;
-    o.x = a.x+b.x;
-    o.y = a.y+b.y;
-    o.z = a.z+b.z;
-    return o;
-}
-
-LGVector vneg(LGVector a) {
-    LGVector o;
-    o.x = -a.x;
-    o.y = -a.y;
-    o.z = -a.z;
-    return o;
-}
-
-LGVector vmulf(LGVector a, float b) {
-    LGVector o;
-    o.x = a.x*b;
-    o.y = a.y*b;
-    o.z = a.z*b;
-    return o;
-}
-
-float vdot(LGVector a, LGVector b) {
-    return a.x*b.x + a.y*b.y + a.z*b.z;
-}
-
-LGVector vcross(LGVector a, LGVector b) {
-    LGVector o;
-    o.x = a.y*b.z - a.z*b.y;
-    o.y = a.z*b.x - a.x*b.z;
-    o.z = a.x*b.y - a.y*b.x;
-    return o;
 }
 
 void dump_worldrep_obj(WorldRep *wr, FILE *f) {
@@ -3373,7 +3380,7 @@ struct command all_commands[] = {
     { "tex_list", do_tex_list,                      "file.mis",             "List all textures." },
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
-    { "merge", do_merge,                            "top.mis bottom.mis -o out.mis",  "Merge two worldreps." },
+    { "merge", do_merge,                            "top.mis bottom.mis a b c d -o out.mis",  "Merge two worldreps separated by the plane ax+by+cz+d=0." },
     { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
