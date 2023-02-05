@@ -388,6 +388,9 @@ typedef enum LGBrushAlign {
     BRALIGN_BY_FACE = 1,
 } LGBrushAlign;
 
+#pragma warning(push)
+#pragma warning(disable: 4702) // unreachable code
+
 static inline LGBrushType _lgbrush_get_type(int32 media) {
     if (media>=0)
         return BRTYPE_TERRAIN;
@@ -414,6 +417,8 @@ static inline LGBrushShape _lgbrush_get_shape(int32 primal) {
     abort_format("Unknown terrain primal %d (0x%08x)", primal, primal);
     return BRSHAPE_INVALID;
 }
+
+#pragma warning(pop)
 
 static inline LGBrushAlign _lgbrush_get_align(int32 primal) {
     return ((primal>>8)&1);
@@ -1731,11 +1736,24 @@ DBFile *dbfile_merge_worldreps(
                     //       clearing its memory, and the csg brush array is
                     //       persistent during a single dromed run.
                     assert_format(wr1_sum==wr2_sum, "Brush %u has different csg planes in both wrs!", i);
-                    int result = memcmp(
-                        &wr1->csg_brush_planes_array[wr1_cursor],
-                        &wr2->csg_brush_planes_array[wr2_cursor],
-                        wr1_sum*sizeof(wr1->csg_brush_planes_array[0]));
-                    assert_format(result==0, "Brush %u has different csg planes in both wrs!", i);
+                    // Make sure the brush planes are--if not bit-identical
+                    // (that can fail, which is a little surprising!), then at
+                    // least very close to each other.
+                    int equal = 1;
+                    for (int32 j=0; j<wr1_sum; ++j) {
+                        LGWRCSGPlane p1 = wr1->csg_brush_planes_array[wr1_cursor+j];
+                        LGWRCSGPlane p2 = wr2->csg_brush_planes_array[wr2_cursor+j];
+                        const double epsilon = 1.0e-10;
+                        double da = fabs(p1.a-p2.a);
+                        double db = fabs(p1.b-p2.b);
+                        double dc = fabs(p1.c-p2.c);
+                        double dd = fabs(p1.d-p2.d);
+                        if (da>epsilon || db>epsilon || dc>epsilon || dd>epsilon) {
+                            equal = 0;
+                            break;
+                        }
+                    }
+                    assert_format(equal, "Brush %u has different csg planes in both wrs!", i);
                     // If we didn't assert, then the brush planes are the same
                     // in both wrs, so we fall through to copying it from wr1.
                     // We advance the wr2 cursor past these planes.
@@ -3090,14 +3108,20 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
         printf("CSG_BRFACES %u: brush %d face %d (0x%08x)\n", i, brush, face, v);
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
-        int32 v = wr->csg_brush_plane_count_array[i];
+        int32 count = wr->csg_brush_plane_count_array[i];
         if ((int32)i>br_id_max)
             printf("*"); // excessive br_id
-        printf("CSG_BRUSH_PLANE_COUNT %u: %d\n", i, v);
+        printf("CSG_BRUSH_PLANE_COUNT %u: %d\n", i, count);
     }
-    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_planes_array); i<iend; ++i) {
-        LGWRCSGPlane p = wr->csg_brush_planes_array[i];
-        printf("CSG_BRUSH_PLANE %u: %f %f %f %f\n", i, p.a, p.b, p.c, p.d);
+    int cursor=0;
+    for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
+        int32 count = wr->csg_brush_plane_count_array[i];
+        while (count--) {
+            LGWRCSGPlane p = wr->csg_brush_planes_array[cursor];
+            printf("CSG_BRUSH_PLANE %u (brush %u): %f %f %f %f\n",
+                cursor, i, p.a, p.b, p.c, p.d);
+            ++cursor;
+        }
     }
     for (uint32 i=0, iend=arrlenu32(wr->csg_brush_surfaceref_count_array); i<iend; ++i) {
         int32 v = wr->csg_brush_surfaceref_count_array[i];
