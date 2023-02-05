@@ -1,0 +1,212 @@
+
+OKAY
+
+CSG data works fine in my tiny test mission, but is a problem in miss20.
+not entirely a surprise!
+
+what is surprising is that it is csg_brush_planes_count_array having a different number of entries:
+
+    wr1 (mid)    csg_brush_planes_count_array entries: 9203
+    wr2 (bottom) csg_brush_planes_count_array entries: 9377
+
+hmm. it _might_ be that it stops adding to it once it hits a brush thats not in the worldrep? no, that doesnt make sense! what _does_ go into this? is it _really_ one per brush? or only one per _csg-processed_ brush? if the latter, then maybe we _do_ want to merge them (but that contradicts what we saw in merge_ext4_*, where there are 6 brushes and 6 entries! and yet in dual we have ~6xxx terrain brushes (~9027 altogether *including* objects!), and yet we get 92xx, 93xx entries in each .mis? wtf?
+
+    >> READ THE CODE!
+
+    (and maybe look at remap_csg_database() ??)
+
+    csg_num_brushes is set in ged_csg.cpp:build_level()
+
+    oh no...
+
+    one thing that is happening is extra blocking brushes being generated immediately
+    prior to portalization (and deleted immediately after) by vision-blocking doors
+    (and possibly other causes?).
+
+    these would presumably also contribute to csg_num_brushes? and would partly
+    explain the high brush ids we see in the different csg_num_brushes entries...
+
+    still, we only have ~118 (if i counted right) doors in total.
+    still, if the brush ids are not getting reset between optimizations, that
+    might explain it: with each portalization, the blocking brushes get higher
+    and higher ids... !
+
+    maybe would need to use compress_br_ids before each portalization pass??
+
+    still would need to deal with the existence of the blocking brushes, maybe?
+        (though since they are temporary--could we somehow derive and discard them?? we could read BRLIST for actual total real brush counts...)
+
+MID:
+
+WREXT chunk:
+  version: 0.30
+  size: 20
+  wr_version: 5
+  flags: 0x00000000
+  lightmap_format: 1
+  lightmap_scale: 0x00000000
+  cell_alloc_size: 17211248
+  cell_count: 4541
+  bsp_extraplane_count: 4
+  bsp_node_count: 14486
+csg_cell_count: 4541
+csg_brfaces_count: 23883
+csg_brush_count: 9203
+csg_brush_plane_total_count: 43285
+
+BOTTOM:
+
+WREXT chunk:
+  version: 0.30
+  size: 20
+  wr_version: 5
+  flags: 0x00000000
+  lightmap_format: 1
+  lightmap_scale: 0x00000000
+  cell_alloc_size: 4539278
+  cell_count: 820
+  bsp_extraplane_count: 0
+  bsp_node_count: 2609
+csg_cell_count: 820
+csg_brfaces_count: 3711
+csg_brush_count: 9377
+csg_brush_plane_total_count: 44335
+
+----------
+
+remap_csg_database(): only used by `compress_br_ids`.
+
+ext6_top/bottom: just did things however
+ext6_top2/bottom2: freshly launched, portalized, exported both in turn.
+ext6_top3/bottom3: freshly launched, compress_br_ids, portalize, export. relaunch and repeat.
+    >> works to keep the data down.
+ext6_top4/bottom4: trying one launch, but compress_br_ids before each portalize...
+    >> doesnt help :(
+ext6_top4/bottom4: trying out file>open again between each...
+    >> doesn't help :(
+
+(:murglow:  maybe i dont need to bother with anything special. maybe i can just `clear_surface_cache` beforehand?
+
+    also investigate these commands:
+        show_cache_surface  // seems to be ND only, but is a null function (probably #ifdef'd out in ND source).
+        toggle_draw_surface // doesnt seem to do anything; but doesnt seem related.
+        cache_feedback      // extra feedback on surface cache usage during portalize (unhelpful)
+        surface_cache       // obsolete, does nothing
+
+SO.... can i just throw out anything that i dont like??? e.g. any beyond the length(BRLIST)???
+
+    >> i _think_ so?
+
+        - see if brfaces evers references any transient brushes (e.g. from door
+            blocking cell renderpolys). since those brushes _do not exist_ anymore,
+            after portalizing, what does dromed even do with them anyway?
+                > well theyre still in dromed's csg_brushes array where it looks
+                  them up. but you cant select anything by clicking on such a face,
+                  so something later checks for the brush id being ok.
+
+        - if all seems okay, we parse brlist to get # of actual brushes, and
+          merge up to there, and throw away anything beyond. that _should_
+          then resolve any conflicts too (hopefully!)
+
+        - if there are any references to higher brush ids, we just bail. it
+          should only happen if a door blockable is making faces, and that is
+          a design error already (unavoidably jorge faces)
+
+----------
+
+also consider flow brushes/flow groups -- i will need those.
+    cf. GEdMedMoMarkWaterAllBrushes()
+
+also would have to deal with the room brushes maybe?
+    cf. RoomToWRProcess()
+
+and so maybe also cluts?
+
+also possibly physics (though i would hope that was all runtime derived data!)
+    cf. PhysRefSystemRebuild()
+
+-----------
+
+menu_checkmark_cfg --- does what?
+hens_changes
+
+hots_state -1  # toggle meonly (disabling other meonly)
+hots_state -2  # toggle active
+hots_state 0   # not active, not meonly
+hots_state 1   # activate
+hots_state 2   # meonly (BUG: does NOT disable other meonly!)
+hots_state 3   # activate+meonly (same BUG)
+
+
+TERRAIN WORKFLOW (sketch)
+================
+
+## Prerequisites:
+
+Brush ids 1, 2, 3 will be the three key area brushes (can guarantee this by setting them to times 0, 1, 2, saving, and reloading.
+
+## Normal state:
+
+Only non-terrain brushes will be selectable/editable, thanks to `hens_changes` setting and the command:
+
+    lock all_terrain
+
+These are both enforced by StartUp.cmd, which triggers on a custom setting in my fm.cfg.
+
+## Switching to Terrain mode:
+
+    unlock all_terrain
+
+maybe set filters to hide objects/rooms/flow?
+
+NOTE: roombrush workflows kinda need terrain to be selectable. we could use a custom setting to keep track of the 'locked terrain' state, and then we could have a hotkey to toggle it. accidentally changing a terrain brush is not a _problem_--would just have to run through the export again when we want a full worldrep--but is inconvenient.
+
+THAT IS THE KEY: _full worldrep_. its fine if we want to work in smaller areas for a while. nothing to be afraid of. so definitely unlocking terrain should be easy.
+
+## Exporting:
+
+we automate the export along the following lines:
+
+    brush_select 1
+    hots_state 0        ; ensure *not* meonly
+    hots_state -1       ; toggle meonly (needed in case i had a different meonly)
+    hots_filter 1       ; ensure "show hot" is on
+    portalize           ; or whatever. (can we do a nested 'run'?)
+    save_mission "_slice1.mis"
+
+    ; repeat for brush 2, brush 3, and then:
+
+    new_world           ; clear everything as a reminder to kick off the merge
+
+the actual merge will be a .bat that does the merge with _slice*.mis and the appropriate cutting planes. (it should _maybe_ refuse to run if a git status check on miss20.mis shows any uncommitted changes?) then we can alt+tab back to dromed, load up the merged result (which should have terrain locked again now). should be ok to build lighting, rooms, etc.
+
+----------------
+
+first successful triple merge:
+
+41201 polys, 8225 cells, 50346 portals, 148368 points, 400004 vlist, 49834 planes
+Total WR size:  33132K
+Geometry:        6390K
+    Cells:        674K
+    Points:      2129K
+    Polygons:    2807K
+    Planes:       778K
+Lightmaps:      26333K
+    Main lm:    18455K
+    Anim lm:     7878K
+BSP:              408K
+
+(if i try to portalize instead:)
+
+RAW cell count: 69599
+
+ERROR: Too many cells.
+
+ERROR: portalization failed, no WR was generated (try to locate and tweak problematic location or brush)
+
+
+slice1: File has 13328 cells.
+slice2: File has 16750 cells.
+slice3: File has  2739 cells.
+                -------
+                 32817
