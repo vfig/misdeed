@@ -140,6 +140,7 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 #define TAG_BRLIST  "BRLIST"
 #define TAG_FAMILY  "FAMILY"
 #define TAG_TXLIST  "TXLIST"
+#define TAG_WEATHER "WEATHER"
 #define TAG_PROP_ANIMLIGHT "P$AnimLight"
 
 typedef struct LGVector {
@@ -633,6 +634,13 @@ typedef struct DBTagBlock {
     char *data;
 } DBTagBlock;
 
+// Property tagblocks encode the sPropertyDesc version in the high 16 bits, and
+// the IDataOps version in the low 16 bits; I believe the latter is always
+// the size of the record.
+#define DBTAGBLOCK_PROP_VERSION_MAJOR(tagblock) ((tagblock)->version.major)
+#define DBTAGBLOCK_PROP_VERSION_MINOR(tagblock) ((tagblock)->version.minor>>16)
+#define DBTAGBLOCK_PROP_ITEM_SIZE(tagblock) ((tagblock)->version.minor&0xFFFFUL)
+
 typedef struct DBFile {
     LGDBVersion version;
     DBTagBlock *tagblock_hash;
@@ -880,6 +888,28 @@ LGVector vcross(LGVector a, LGVector b) {
     o.y = a.z*b.x - a.x*b.z;
     o.z = a.x*b.y - a.y*b.x;
     return o;
+}
+
+/** Weather stuff */
+
+typedef uint8 LGCellWeather;
+
+#define LGCELLWEATHER_DEBRIS 1
+#define LGCELLWEATHER_PRECIPITATION = 2
+#define LGCELLWEATHER_WIND = 4
+
+#define LGWRCellWeatherDebris(v) ((v)&LGCELLWEATHER_DEBRIS)
+#define LGWRCellWeatherPrecipitation(v) ((v)&LGCELLWEATHER_PRECIPITATION)
+#define LGWRCellWeatherWind(v) ((v)&LGCELLWEATHER_WIND)
+
+
+LGCellWeather *weather_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tag_name_eq_str(tagblock->key, TAG_WEATHER));
+    assert(tagblock->version.major==1 && tagblock->version.minor==3);
+
+    LGCellWeather *array = NULL;
+    DBTAGBLOCK_READ_ARRAY(array, tagblock);
+    return array;
 }
 
 /** WorldRep stuff */
@@ -1474,6 +1504,8 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     free(buffer);
 }
 
+LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock);
+
 DBFile *dbfile_merge_worldreps(
     DBFile *dbfile1,
     DBFile *dbfile2,
@@ -2029,6 +2061,31 @@ DBFile *dbfile_merge_worldreps(
         wrm->animlight_to_cell_array[i].cell_index += cell_fixup;
     }
 
+    // merged weather := [dbfile1 weather] [dbfile2 weather]
+    LGDBVersion weather_version;
+    LGCellWeather *weatherm = NULL;
+    {
+        DBTagBlock *tagblock1 = dbfile_get_tag(dbfile1, TAG_WEATHER);
+        DBTagBlock *tagblock2 = dbfile_get_tag(dbfile2, TAG_WEATHER);
+        weather_version = tagblock1->version;
+        LGCellWeather *weather1 = weather_load_from_tagblock(tagblock1);
+        LGCellWeather *weather2 = weather_load_from_tagblock(tagblock2);
+        uint32 weather1_count = arrlenu32(weather1);
+        uint32 weather2_count = arrlenu32(weather2);
+        assert(weather1_count==(uint32)wr1_cell_count);
+        assert(weather2_count==(uint32)wr2_cell_count);
+        uint32 weatherm_count = weather1_count+weather2_count;
+        uint32 weather1_start = 0;
+        uint32 weather2_start = weather1_start+weather1_count;
+        arrsetlen(weatherm, weatherm_count);
+        for (uint32 i=0, j=weather1_start; i<weather1_count; ++i, ++j)
+            weatherm[j] = weather1[i];
+        for (uint32 i=0, j=weather2_start; i<weather2_count; ++i, ++j)
+            weatherm[j] = weather2[i];
+        arrfree(weather1);
+        arrfree(weather2);
+    }
+
     // merged AnimLight props := ...well...
     //
     // AnimLight props are stored per-object; since the objects in both input
@@ -2042,43 +2099,16 @@ DBFile *dbfile_merge_worldreps(
     // NOTE: because the two arrays are being dovetailed and not concatenated,
     //       we also have to apply fixups right now, because later we won't
     //       know which AnimLight comes from dbfile1 and which from dbfile2.
-    uint32 animlight_version_minor;
+    LGDBVersion animlight_version;
+    int old_animlight_version;
     LGAnimLightProp80 *alm = NULL;
     {
-        LGAnimLightProp80 *al1 = NULL;
-        LGAnimLightProp80 *al2 = NULL;
-        DBTagBlock *tagblock = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2
-            && (tagblock->version.minor==76 || tagblock->version.minor==80));
-        animlight_version_minor = tagblock->version.minor;
-        if (animlight_version_minor==76) {
-            LGAnimLightProp76 *al1_old = NULL;
-            DBTAGBLOCK_READ_ARRAY(al1_old, tagblock);
-            arrsetlen(al1, arrlen(al1_old));
-            for (uint32 i=0, iend=arrlenu32(al1); i<iend; ++i) {
-                memcpy(&al1[i], &al1_old[i], sizeof(LGAnimLightProp76));
-                al1[i].prop.is_dynamic = 0;
-            }
-            arrfree(al1_old);
-        } else {
-            DBTAGBLOCK_READ_ARRAY(al1, tagblock);
-        }
-        tagblock = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
-        assert(tagblock->version.major==2
-            && (tagblock->version.minor==76 || tagblock->version.minor==80));
-        assert(tagblock->version.minor==animlight_version_minor);
-        if (animlight_version_minor==76) {
-            LGAnimLightProp76 *al2_old = NULL;
-            DBTAGBLOCK_READ_ARRAY(al2_old, tagblock);
-            arrsetlen(al2, arrlen(al2_old));
-            for (uint32 i=0, iend=arrlenu32(al2); i<iend; ++i) {
-                memcpy(&al2[i], &al2_old[i], sizeof(LGAnimLightProp76));
-                al2[i].prop.is_dynamic = 0;
-            }
-            arrfree(al2_old);
-        } else {
-            DBTAGBLOCK_READ_ARRAY(al2, tagblock);
-        }
+        DBTagBlock *tagblock1 = dbfile_get_tag(dbfile1, TAG_PROP_ANIMLIGHT);
+        DBTagBlock *tagblock2 = dbfile_get_tag(dbfile2, TAG_PROP_ANIMLIGHT);
+        animlight_version = tagblock1->version;
+        old_animlight_version = (DBTAGBLOCK_PROP_ITEM_SIZE(tagblock1)==76);
+        LGAnimLightProp80 *al1 = animlight_prop_load_from_tagblock(tagblock1);
+        LGAnimLightProp80 *al2 = animlight_prop_load_from_tagblock(tagblock2);
         assert(arrlen(al1)==arrlen(al2));
         arrsetlen(alm, arrlen(al1));
         uint16 lighttocell1_fixup = wr1_animlighttocell_start;
@@ -2136,6 +2166,7 @@ DBFile *dbfile_merge_worldreps(
         if (tag_name_eq_str(src_tagblock->key, TAG_WR)
         || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
         || tag_name_eq_str(src_tagblock->key, TAG_WREXT)
+        || tag_name_eq_str(src_tagblock->key, TAG_WEATHER)
         || tag_name_eq_str(src_tagblock->key, TAG_PROP_ANIMLIGHT))
             continue;
 
@@ -2151,13 +2182,21 @@ DBFile *dbfile_merge_worldreps(
         hmputs(dbfile_out->tagblock_hash, tagblock);
     }
 
+    // Write the merged Weather to the output.
+    {
+        DBTagBlock tagblock = {0};
+        tagblock.key = tag_name_from_str(TAG_WEATHER);
+        tagblock.version = weather_version;
+        DBTAGBLOCK_WRITE_ARRAY(&tagblock, weatherm);
+        hmputs(dbfile_out->tagblock_hash, tagblock);
+    }
+
     // Write the merged AnimLight prop to the output.
     {
         DBTagBlock tagblock = {0};
         tagblock.key = tag_name_from_str(TAG_PROP_ANIMLIGHT);
-        tagblock.version.major = 2;
-        tagblock.version.minor = animlight_version_minor;
-        if (animlight_version_minor==76) {
+        tagblock.version = animlight_version;
+        if (old_animlight_version) {
             LGAnimLightProp76 *alm_old = NULL;
             arrsetlen(alm_old, arrlen(alm));
             for (uint32 i=0, iend=arrlenu32(alm_old); i<iend; ++i) {
@@ -2448,6 +2487,32 @@ void txlist_merge(TextureList *texs1, TextureList *texs2, TextureList **out_texs
     *out_texs = merged;
     *out_texs2_remap = remap;
 }
+
+/** Property stuff */
+
+LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tag_name_eq_str(tagblock->key, TAG_PROP_ANIMLIGHT));
+    LGAnimLightProp80 *array = NULL;
+    assert(DBTAGBLOCK_PROP_VERSION_MAJOR(tagblock)==2
+        && DBTAGBLOCK_PROP_VERSION_MINOR(tagblock)==0
+        && (DBTAGBLOCK_PROP_ITEM_SIZE(tagblock)==76
+            || DBTAGBLOCK_PROP_ITEM_SIZE(tagblock)==80));
+
+    if (DBTAGBLOCK_PROP_ITEM_SIZE(tagblock)==76) {
+        LGAnimLightProp76 *array_old = NULL;
+        DBTAGBLOCK_READ_ARRAY(array_old, tagblock);
+        arrsetlen(array, arrlen(array_old));
+        for (uint32 i=0, iend=arrlenu32(array); i<iend; ++i) {
+            memcpy(&array[i], &array_old[i], sizeof(LGAnimLightProp76));
+            array[i].prop.is_dynamic = 0;
+        }
+        arrfree(array_old);
+    } else {
+        DBTAGBLOCK_READ_ARRAY(array, tagblock);
+    }
+    return array;
+}
+
 
 /** Commands and stuff */
 
@@ -3332,20 +3397,15 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
     }
     char *in_filename = argv[0];
     DBFile *dbfile = dbfile_load(in_filename);
-    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
-
-    uint32 count = tagblock->size/sizeof(LGAnimLightProp80);
-    char *pread = (char *)tagblock->data;
-    LGAnimLightProp80 *props = NULL;
-    MEM_READ_ARRAY(props, count, pread);
+    LGAnimLightProp80 *props = animlight_prop_load_from_tagblock(
+        dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT));
+    uint32 count = arrlenu32(props);
     dump("%u animlights:\n", count);
     for (uint32 i=0; i<count; ++i) {
         LGAnimLightProp80 *prop = &props[i];
         dump("%4u:\n", i);
         dump("    id: %d\n", prop->header.id);
         dump("    size: %u\n", prop->header.size);
-        dump("    sizeof(LGAnimLight80): %u\n", (uint32)sizeof(LGAnimLight80));
-        assert(prop->header.size==sizeof(LGAnimLight80));
         LGAnimLight80 *animlight = &(props[i].prop);
         LGBaseLight *base = &(animlight->x.base);
         LGAnimLightAnimation *animation = &(animlight->x.animation);
@@ -3363,9 +3423,6 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
         // remaining fields are runtime state that i dont care about.
     }
     arrfree(props);
-
-    // Ensure we have read all the available data:
-    assert(pread==(tagblock->data+tagblock->size));
 
     dbfile = dbfile_free(dbfile);
     return 0;
