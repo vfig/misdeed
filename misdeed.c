@@ -29,14 +29,14 @@ typedef int32_t bool32;
 
 #define abort_message(message) \
     do { \
-    fprintf(stderr, "\t%s\n", message); \
+    fprintf(stderr, "FATAL: %s\n", message); \
     fflush(stderr); \
     abort(); \
     } while(0)
 
 #define abort_format(fmt, ...) \
     do { \
-    fprintf(stderr, "\t" fmt "\n", __VA_ARGS__); \
+    fprintf(stderr, "FATAL: " fmt "\n", __VA_ARGS__); \
     fflush(stderr); \
     abort(); \
     } while(0)
