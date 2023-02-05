@@ -114,23 +114,24 @@ SO.... can i just throw out anything that i dont like??? e.g. any beyond the len
 
 ----------
 
-also consider flow brushes/flow groups -- i will need those.
+flow brushes/flow groups?
     cf. GEdMedMoMarkWaterAllBrushes()
     - looks clear! this just sets motion_index on the cell itself,
       and since we have the one source .mis, the motion indexes
       are identical across them, and dont need fixups.
 
-also would have to deal with the room brushes maybe?
+room brushes?
     cf. RoomToWRProcess()
     - Rooms themselves just set up callbacks. 
-    - but the Weather system uses them, and stores things in the Weather
-      hashtable property.
+    - but only the Weather system uses them. Dealt with it now.
 
-pathfinding? (think it should be fine. because all those cells still exist. would be nice to merge, but unnecessary.)
+pathfinding? would be nice but not needed
+    - doesnt store wr cell ids (looks them up by location later as needed)
 
-and so maybe also cluts?
+cluts?
+    - shouldnt be needed, should be the same across all.
 
-also possibly physics (though i would hope that was all runtime derived data!)
+physics? (though i would hope that was all runtime derived data!)
     cf. PhysRefSystemRebuild()
     - looks clear! physrefs arent saved, so this pass is just to update
       the physics runtime because youve just changed the world.
