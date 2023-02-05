@@ -380,6 +380,7 @@ typedef enum LGBrushShape {
     BRSHAPE_PYRAMID = 2,
     BRSHAPE_APEX_PYRAMID = 3,
     BRSHAPE_DODECAHEDRON = 4,
+    BRSHAPE_WEDGE = 7,
 
     BRSHAPE_INVALID = -1,
 } LGBrushShape;
@@ -388,6 +389,21 @@ typedef enum LGBrushAlign {
     BRALIGN_BY_VERTEX = 0,
     BRALIGN_BY_FACE = 1,
 } LGBrushAlign;
+
+typedef enum LGBrushMedium {
+    BRMEDIUM_SOLID = 0,
+    BRMEDIUM_AIR = 1,
+    BRMEDIUM_WATER = 2,
+    BRMEDIUM_FLOOD = 3,
+    BRMEDIUM_EVAPORATE = 4,
+    BRMEDIUM_SOLID2WATER = 5,
+    BRMEDIUM_SOLID2AIR = 6,
+    BRMEDIUM_AIR2SOLID = 7,
+    BRMEDIUM_WATER2SOLID = 8,
+    BRMEDIUM_BLOCKABLE = 9,
+
+    BRMEDIUM_INVALID = -1,
+} LGBrushMedium;
 
 #pragma warning(push)
 #pragma warning(disable: 4702) // unreachable code
@@ -407,8 +423,12 @@ static inline LGBrushShape _lgbrush_get_shape(int32 primal) {
     switch (type) {
     case 0:
         switch (sides) {
+        case 0: return BRSHAPE_CUBE; // cf. brush id 907 in T1 miss12.mis
         case 1: return BRSHAPE_CUBE;
-        case 6: return BRSHAPE_DODECAHEDRON; // TODO: i think!!
+        case 6: return BRSHAPE_DODECAHEDRON;
+        case 7: return BRSHAPE_WEDGE;
+        // 8: Line (?)
+        // 9: Light (not terrain!)
         }
         break;
     case 1: return BRSHAPE_CYLINDER;
@@ -417,6 +437,13 @@ static inline LGBrushShape _lgbrush_get_shape(int32 primal) {
     }
     abort_format("Unknown terrain primal %d (0x%08x)", primal, primal);
     return BRSHAPE_INVALID;
+}
+
+static inline LGBrushMedium _lgbrush_get_medium(int32 media) {
+    if (media>=BRMEDIUM_SOLID && media<=BRMEDIUM_BLOCKABLE)
+        return media;
+    else
+        return BRMEDIUM_INVALID;
 }
 
 #pragma warning(pop)
@@ -3238,15 +3265,28 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
         "pyramid",
         "apex pyramid",
         "dodecahedron",
+        "wedge",
     };
     static const char *brush_align_s[] = {
         "by sides",
         "by vertices",
     };
+    static const char *brush_medium_s[] = {
+        "solid",
+        "air",
+        "water",
+        "flood",
+        "evaporate",
+        "solid->water",
+        "solid->air",
+        "air->solid",
+        "water->solid",
+        "blockable",
+    };
 
     for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
         LGBRLISTBrush br = brushes[i];
-        printf("Brush %u:\n", i);
+        printf("Brush %d, time %u:\n", (int)br.br_id, i);
         int type = LGBRUSH_GET_TYPE(br);
         assert(type!=BRTYPE_INVALID);
         printf("\ttype: %d %s\n", type, brush_type_s[type]);
@@ -3256,6 +3296,8 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
             printf("\tshape: %d %s\n", type, brush_shape_s[shape]);
             int sides = LGBRUSH_GET_TERR_SIDES(br);
             printf("\tsides: %d\n", sides);
+            int medium = LGBRUSH_GET_MEDIUM(br);
+            printf("\tmedium: %d %s\n", medium, brush_medium_s[medium]);
         }
         int align = LGBRUSH_GET_ALIGN(br);
         printf("\talign: %d %s\n", type, brush_align_s[align]);
