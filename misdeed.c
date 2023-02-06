@@ -1001,7 +1001,9 @@ typedef struct WorldRep {
 #define CSG_BRFACE_GET_FACE_INDEX(brface) ((brface)&0xff)
 #define CSG_BRFACE(br,face) (((br)<<8)|((face)&0xff))
 
-int16 brlist_get_id_max(DBFile *dbfile);
+LGBRLISTBrush *brlist_load_from_tagblock(DBTagBlock *tagblock);
+LGBRLISTBrush *brlist_sorted_by_id(LGBRLISTBrush *brlist);
+int16 brlist_get_id_max(LGBRLISTBrush *brushes);
 
 float32 _wr_decode_lightmap_scale(int32 lightmap_scale) {
     int32 value = lightmap_scale;
@@ -1548,6 +1550,12 @@ DBFile *dbfile_merge_worldreps(
         int result = memcmp(tagblock1->data, tagblock1->data, tagblock1->size);
         assert_message(result==0, "BRLIST is different.");
     }
+    LGBRLISTBrush *brlist1 = brlist_load_from_tagblock(
+        dbfile_get_tag(dbfile1, TAG_BRLIST));
+    LGBRLISTBrush *brushes1 = brlist_sorted_by_id(brlist1);
+    LGBRLISTBrush *brlist2 = brlist_load_from_tagblock(
+        dbfile_get_tag(dbfile2, TAG_BRLIST));
+    LGBRLISTBrush *brushes2 = brlist_sorted_by_id(brlist2);
     // NOTE: When portalizing, Dromed inserts a new "blockable" brush for every
     //       visibility-blocking door, so that it can guarantee portals that
     //       can be closed when the door is closed. These brushes are appended
@@ -1577,8 +1585,8 @@ DBFile *dbfile_merge_worldreps(
     //       brushes might also conribute phantom entries in the lower parts
     //       of the array, but these will not matter.
     //
-    int16 br_id_max = brlist_get_id_max(dbfile1);
-    assert(brlist_get_id_max(dbfile2)==br_id_max);
+    int16 br_id_max = brlist_get_id_max(brushes1);
+    assert(brlist_get_id_max(brushes2)==br_id_max);
 
     // Load both worldreps and merge them.
     WorldRep *wr1 = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile1));
@@ -1832,26 +1840,32 @@ DBFile *dbfile_merge_worldreps(
                     //       both wrs, but because the csg code is sloppy about
                     //       clearing its memory, and the csg brush array is
                     //       persistent during a single dromed run.
-                    assert_format(wr1_sum==wr2_sum, "Brush %u has different csg planes in both wrs!", i);
-                    // Make sure the brush planes are--if not bit-identical
-                    // (that can fail, which is a little surprising!), then at
-                    // least very close to each other.
-                    int equal = 1;
-                    for (int32 j=0; j<wr1_sum; ++j) {
-                        LGWRCSGPlane p1 = wr1->csg_brush_planes_array[wr1_cursor+j];
-                        LGWRCSGPlane p2 = wr2->csg_brush_planes_array[wr2_cursor+j];
-                        const double epsilon = 1.0e-10;
-                        double da = fabs(p1.a-p2.a);
-                        double db = fabs(p1.b-p2.b);
-                        double dc = fabs(p1.c-p2.c);
-                        double dd = fabs(p1.d-p2.d);
-                        if (da>epsilon || db>epsilon || dc>epsilon || dd>epsilon) {
-                            equal = 0;
-                            break;
+                    assert_format(wr1_sum==wr2_sum, "Brush %u has different count of csg planes in both wrs!", i);
+                    // NOTE: it seems an area brush can sometimes be in both
+                    //       csg_brush lists with essentially randomly different
+                    //       data? wild. skip them, and all non-terrain brushes.
+                    LGBRLISTBrush *b1 = &brushes1[i];
+                    // NOTE: we dont need to look at b2, because we have already
+                    //       confirmed both BRLISTs are bit-identical.
+                    if (LGBRUSH_GET_TYPE(*b1)==BRTYPE_TERRAIN) {
+                        // Make sure the brush planes are--if not bit-identical
+                        // (that can fail, which is a little surprising!), then at
+                        // least very close to each other.
+                        for (int32 j=0; j<wr1_sum; ++j) {
+                            LGWRCSGPlane p1 = wr1->csg_brush_planes_array[wr1_cursor+j];
+                            LGWRCSGPlane p2 = wr2->csg_brush_planes_array[wr2_cursor+j];
+                            const double epsilon = 1.0e-10;
+                            double da = fabs(p1.a-p2.a);
+                            double db = fabs(p1.b-p2.b);
+                            double dc = fabs(p1.c-p2.c);
+                            double dd = fabs(p1.d-p2.d);
+                            if (da>epsilon || db>epsilon || dc>epsilon || dd>epsilon) {
+                                abort_format("Brush %u has different csg planes in both wrs!", i);
+                                break;
+                            }
                         }
                     }
-                    assert_format(equal, "Brush %u has different csg planes in both wrs!", i);
-                    // If we didn't assert, then the brush planes are the same
+                    // If we didn't abort, then the brush planes are the same
                     // in both wrs, so we fall through to copying it from wr1.
                     // We advance the wr2 cursor past these planes.
                     wr2_cursor += wr2_sum;
@@ -2266,19 +2280,41 @@ LGBRLISTBrush *brlist_load_from_tagblock(DBTagBlock *tagblock) {
     return brushes;
 }
 
-int16 brlist_get_id_max(DBFile *dbfile) {
+int16 brlist_get_id_max(LGBRLISTBrush *brushes) {
     int16 br_id_max = -1;
-    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_BRLIST);
-    LGBRLISTBrush *brushes = brlist_load_from_tagblock(tagblock);
     for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
         int16 br_id = brushes[i].br_id;
         if (br_id>br_id_max)
             br_id_max = br_id;
     }
-    arrfree(brushes);
     return br_id_max;
 }
 
+LGBRLISTBrush *brlist_sorted_by_id(LGBRLISTBrush *brlist) {
+    LGBRLISTBrush *brushes = NULL;
+    int16 id_max = brlist_get_id_max(brlist);
+    arrsetlen(brushes, id_max+1);
+    LGBRLISTBrush null_brush = {0};
+    null_brush.br_id = -1;
+    null_brush.media = -1;
+    // Set all entries to an invalid brush.
+    for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i)
+        brushes[i] = null_brush;
+    // Copy all the brushes over.
+    for (uint32 i=0, iend=arrlenu32(brlist); i<iend; ++i) {
+        LGBRLISTBrush *b = &brlist[i];
+        int16 id = b->br_id;
+        brushes[id] = *b;
+    }
+    // Ensure no ids are invalid -- except 0.
+    for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
+        if (i==0 && brushes[i].br_id!=-1)
+            abort_message("BRLIST contained brush with id 0");
+        if (i!=0 && brushes[i].br_id==-1)
+            abort_format("BRLIST is missing brush for id %u", i);
+    }
+    return brushes;
+}
 
 /** Family stuff */
 
@@ -2783,9 +2819,38 @@ void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
 void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
     fprintf(f, "digraph BSP {\n");
     fprintf(f, "  node [shape=record];\n");
+    int maxdepth = 2;
     LGWRBSPNode *node_array = wr->bsp_node_array;
-    for (uint32 i=0, iend=arrlenu32(node_array); i<iend; ++i) {
-        LGWRBSPNode *node = &node_array[i];
+    struct frame {
+        LGWRBSPNode *node;
+        int depth;
+    };
+    struct frame *queue = NULL;
+    int cursor = 0;
+    struct frame frame;
+    frame.node = &node_array[0];
+    frame.depth = 0;
+    arrput(queue, frame);
+    while (cursor<arrlen(queue)) {
+    //for (uint32 i=0, iend=arrlenu32(node_array); i<iend; ++i) {
+    //    LGWRBSPNode *node = &node_array[i];
+        frame = queue[cursor++];
+        LGWRBSPNode *node = frame.node;
+        int i = (int)(node-node_array);
+        if (frame.depth<maxdepth) {
+            if (! BSP_IS_LEAF(node)) {
+                struct frame child;
+                if (node->inside_index!=BSP_INVALID) {
+                    child.node = &node_array[node->inside_index];
+                    child.depth = frame.depth+1;
+                    arrput(queue, child);
+                }
+                if (node->outside_index!=BSP_INVALID)
+                    child.node = &node_array[node->outside_index];
+                    child.depth = frame.depth+1;
+                    arrput(queue, child);
+            }
+        }
 
         // Top row: node or leaf and id.
 
@@ -3058,7 +3123,11 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
-    int16 br_id_max = brlist_get_id_max(dbfile);
+
+    LGBRLISTBrush *brlist = brlist_load_from_tagblock(
+        dbfile_get_tag(dbfile, TAG_BRLIST));
+    int16 br_id_max = brlist_get_id_max(brlist);
+    arrfree(brlist);
 
     const char *format_name[] = { "WR", "WRRGB", "WREXT" };
     printf("format: %s\n", format_name[wr->format]);
@@ -3249,7 +3318,7 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
     char *in_filename = argv[0];
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_BRLIST);
-    LGBRLISTBrush *brushes = brlist_load_from_tagblock(tagblock);
+    LGBRLISTBrush *brlist = brlist_load_from_tagblock(tagblock);
 
     static const char *brush_type_s[] = {
         "terrain",
@@ -3284,8 +3353,8 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
         "blockable",
     };
 
-    for (uint32 i=0, iend=arrlenu32(brushes); i<iend; ++i) {
-        LGBRLISTBrush br = brushes[i];
+    for (uint32 i=0, iend=arrlenu32(brlist); i<iend; ++i) {
+        LGBRLISTBrush br = brlist[i];
         printf("Brush %d, time %u:\n", (int)br.br_id, i);
         int type = LGBRUSH_GET_TYPE(br);
         assert(type!=BRTYPE_INVALID);
@@ -3314,7 +3383,7 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
         }
     }
 
-    arrfree(brushes);
+    arrfree(brlist);
     dbfile = dbfile_free(dbfile);
     return 0;
 }

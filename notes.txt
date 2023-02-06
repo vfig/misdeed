@@ -221,3 +221,14 @@ slice2: File has 16750 cells.
 slice3: File has  2739 cells.
                 -------
                  32817
+
+===========================
+
+its all failing!
+
+  slice2 (mid) is inside out in miss20 merge
+
+  so far cant get merge_ext7 to show the same problem :(
+    > got complex enough that one of its slices has two root nodes
+    > see if we can get both to do so?
+      (maybe we need to swap in/out on our out child or something??)
