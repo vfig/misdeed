@@ -134,6 +134,7 @@ void dump(char *fmt, ...) {
 #pragma pack(push, 1)
 
 static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
+#define TAG_AIPATH  "AIPATH"
 #define TAG_WR      "WR"
 #define TAG_WRRGB   "WRRGB"
 #define TAG_WREXT   "WREXT"
@@ -359,6 +360,123 @@ typedef struct LGWRCSGSurfaceRef {
                         //     position in csg_brush_surfaceref_count_array).
     int16 vertex;
 } LGWRCSGSurfaceRef;
+
+// AIPATH
+
+typedef uint32 LGAIPATHCellID;
+typedef uint32 LGAIPATHVertexID;
+typedef uint32 LGAIPATHCell2CellLinkID;
+typedef uint32 LGAIPATHCell2VertexLinkID;
+
+typedef uint16 LGAIPATHCellIDPacked;
+typedef uint16 LGAIPATHVertexIDPacked;
+typedef uint16 LGAIPATHCell2CellLinkIDPacked;
+typedef uint16 LGAIPATHCell2VertexLinkIDPacked;
+
+typedef uint16 LGAIPATHZone;
+typedef uint8 LGAIPATHOkBits;
+
+typedef struct LGAIPATHCellv3_3 {
+    LGAIPATHCell2VertexLinkIDPacked firstVertex; // in pathCell2VertexLink array
+    LGAIPATHCell2CellLinkIDPacked firstCell;   // in pathCell2CellLink array
+    LGAIPATHCellIDPacked plane;
+    LGAIPATHCellIDPacked next;            // in the A* search open list
+    LGAIPATHCellIDPacked bestNeighbor;    // bestNeighbor yet found during the search, index in g_AIPathDB.m_Cells
+    LGAIPATHCell2CellLinkIDPacked linkFromNeighbor;// link used to connect neighbor to me
+    uint8 vertexCount; // in pathCell2VertexLink array
+    uint8 pathFlags;
+    uint8 cellCount; // in pathCell2CellLink array
+    uint8 wrapFlags; // set if any ID's have wrapped. Only used in processing, not in game!
+    LGVector center;
+         // extra info needed for each cell, to help decide what motions to
+         // play & whatever; all handled in terms of bits
+    uint32 flags;
+#if 0    
+         // constants matching bit field sizes
+         #define kAIPathCellNumLightLevels 16
+         #define kAIPathCellNumStairSizes 4
+
+         // Each group of fields represents one byte.  4 bytes total.
+         uint m_LightLevel : 4;
+         uint m_IsRamp : 1;    // Is it slanted?
+         uint m_IsStair : 1;   // Are nearby surfaces a little lower?
+/*28*/   uint m_StairSize : 2;
+
+         uint m_Volume : 3;
+         uint m_CeilingHeight : 3;
+         uint m_Doorway : 1;
+/*29*/   uint m_Corner : 1;
+
+         uint m_CliffEdge : 1;
+         uint m_Water : 1;
+/*30*/   uint pad30_2 : 6;
+
+/*31*/   uint pad31 : 8;
+#endif
+} LGAIPATHCellv3_3;
+
+typedef struct LGAIPATHCellv3_4 {
+    LGAIPATHCell2VertexLinkID firstVertex; // in pathCell2VertexLink array
+    LGAIPATHCell2CellLinkID firstCell;   // in pathCell2CellLink array
+    LGAIPATHCellID plane;
+    LGAIPATHCellID next;            // in the A* search open list
+    LGAIPATHCellID bestNeighbor;    // bestNeighbor yet found during the search, index in g_AIPathDB.m_Cells
+    LGAIPATHCell2CellLinkID linkFromNeighbor;// link used to connect neighbor to me
+    uint8 vertexCount; // in pathCell2VertexLink array
+    uint8 pathFlags;
+    uint8 cellCount; // in pathCell2CellLink array
+    uint8 wrapFlags; // set if any ID's have wrapped. Only used in processing, not in game!
+    LGVector center;
+         // extra info needed for each cell, to help decide what motions to
+         // play & whatever; all handled in terms of bits
+    uint32 flags;
+#if 0    
+         // constants matching bit field sizes
+         #define kAIPathCellNumLightLevels 16
+         #define kAIPathCellNumStairSizes 4
+
+         // Each group of fields represents one byte.  4 bytes total.
+         uint m_LightLevel : 4;
+         uint m_IsRamp : 1;    // Is it slanted?
+         uint m_IsStair : 1;   // Are nearby surfaces a little lower?
+/*28*/   uint m_StairSize : 2;
+
+         uint m_Volume : 3;
+         uint m_CeilingHeight : 3;
+         uint m_Doorway : 1;
+/*29*/   uint m_Corner : 1;
+
+         uint m_CliffEdge : 1;
+         uint m_Water : 1;
+/*30*/   uint pad30_2 : 6;
+
+/*31*/   uint pad31 : 8;
+#endif
+} LGAIPATHCellv3_4;
+
+typedef struct LGAIPATHCellPlane {
+    LGVector normal;
+    float32 constant;
+} LGAIPATHCellPlane;
+
+typedef struct LGAIPATHVertex {
+    LGVector pt;
+    int32 ptInfo;
+} LGAIPATHVertex;
+
+typedef struct LGAIPATHCellLink {
+    LGAIPATHCellIDPacked dest;
+    LGAIPATHVertexIDPacked vertex_1;
+    LGAIPATHVertexIDPacked vertex_2;
+    LGAIPATHOkBits okBits;
+    uint8 cost;
+} LGAIPATHCellLink;
+
+typedef struct LGAIPATHCell2VertexLink {
+    LGAIPATHVertexID id;
+} LGAIPATHCell2VertexLink;
+
+// BRLIST
 
 #define LGBRLIST_FACE_COUNT_MAX_OLDDARK 12
 #define LGBRLIST_FACE_COUNT_MAX_NEWDARK 28
@@ -2254,6 +2372,59 @@ DBFile *dbfile_merge_worldreps(
     return dbfile_out;
 }
 
+/** AIPATH stuff */
+
+typedef struct AIPathDB {
+    int32 initialized;
+    LGAIPATHCellID cell_count;
+    LGAIPATHCellv3_4 *cell_array;
+    LGAIPATHCellID plane_count;
+    LGAIPATHCellPlane *plane_array;
+    LGAIPATHVertexID vertex_count;
+    LGAIPATHVertex *vertex_array;
+    LGAIPATHCell2CellLinkID link_count;
+    LGAIPATHCellLink *link_array;
+    LGAIPATHCell2VertexLinkID cell_vertex_count;
+    LGAIPATHCell2VertexLink *cell_vertex_array;
+    uint32 objhint_count;
+    /* TODO: more stuff! */
+} AIPathDB;
+
+void aipathdb_load_from_tagblock(struct AIPathDB *aipathdb, DBTagBlock *tagblock) {
+    MEM_ZERO(*aipathdb);
+
+    // TODO: we could read v3_3 if we want, but newdark does v3_4.
+    assert(tagblock->version.major==3 && tagblock->version.minor==4);
+    char *pread = tagblock->data;
+    char *pend = pread+tagblock->size;
+
+    MEM_READ(aipathdb->initialized, pread);
+    if (! aipathdb->initialized)
+        return;
+
+    int32 obsolete;
+    MEM_READ(obsolete, pread);
+
+    MEM_READ(aipathdb->cell_count, pread);
+    MEM_READ_ARRAY(aipathdb->cell_array, (aipathdb->cell_count+1), pread);
+
+    MEM_READ(aipathdb->plane_count, pread);
+    MEM_READ_ARRAY(aipathdb->plane_array, (aipathdb->plane_count+1), pread);
+
+    MEM_READ(aipathdb->vertex_count, pread);
+    MEM_READ_ARRAY(aipathdb->vertex_array, (aipathdb->vertex_count+1), pread);
+
+    MEM_READ(aipathdb->link_count, pread);
+    MEM_READ_ARRAY(aipathdb->link_array, (aipathdb->link_count+1), pread);
+
+    MEM_READ(aipathdb->cell_vertex_count, pread);
+    MEM_READ_ARRAY(aipathdb->cell_vertex_array, (aipathdb->cell_vertex_count+1), pread);
+
+    MEM_READ(aipathdb->objhint_count, pread);
+
+    // TODO: more fields!
+}
+
 /** BRLIST stuff */
 
 LGBRLISTBrush *brlist_load_from_tagblock(DBTagBlock *tagblock) {
@@ -3311,6 +3482,66 @@ int do_dump_wr(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_aipath(int argc, char **argv, struct command *cmd) {
+    if (argc!=1) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_AIPATH);
+    AIPathDB aipathdb;
+    aipathdb_load_from_tagblock(&aipathdb, tagblock);
+
+    printf("initialized: %u\n", aipathdb.initialized);
+    printf("Cell count: %u\n", aipathdb.cell_count);
+    printf("Plane count: %u\n", aipathdb.plane_count);
+    printf("Vertex count: %u\n", aipathdb.vertex_count);
+    printf("Link count: %u\n", aipathdb.link_count);
+    printf("Cell vertex count: %u\n", aipathdb.cell_vertex_count);
+    for (LGAIPATHCellID i=0, iend=aipathdb.cell_count; i<iend; ++i) {
+        LGAIPATHCellv3_4 *cell = &aipathdb.cell_array[i];
+        printf("Cell %u:\n", i);
+        printf("\tfirstVertex: %u\n", cell->firstVertex);
+        printf("\tfirstCell: %u\n", cell->firstCell);
+        printf("\tplane: %u\n", cell->plane);
+        printf("\tnext: %u\n", cell->next);
+        printf("\tbestNeighbor: %u\n", cell->bestNeighbor);
+        printf("\tlinkFromNeighbor: %u\n", cell->linkFromNeighbor);
+        printf("\tvertexCount: %u\n", (uint32)cell->vertexCount);
+        printf("\tpathFlags: 0x%02x\n", (uint32)cell->pathFlags);
+        printf("\tcellCount: %u\n", (uint32)cell->cellCount);
+        printf("\twrapFlags: 0x%02x\n", (uint32)cell->wrapFlags);
+        printf("\tcenter: %f %f %f\n", cell->center.x, cell->center.y, cell->center.z);
+        printf("\tflags: 0x%08x\n", cell->flags);
+    }
+    for (LGAIPATHCellID i=0, iend=aipathdb.plane_count; i<iend; ++i) {
+        LGAIPATHCellPlane *plane = &aipathdb.plane_array[i];
+        printf("Plane %u: %f %f %f %f\n", i, plane->normal.x, plane->normal.y, plane->normal.z, plane->constant);
+    }
+    for (LGAIPATHVertexID i=0, iend=aipathdb.vertex_count; i<iend; ++i) {
+        LGAIPATHVertex *vertex = &aipathdb.vertex_array[i];
+        printf("Vertex %u: %f %f %f, info %d\n", i, vertex->pt.x, vertex->pt.y, vertex->pt.z, vertex->ptInfo);
+    }
+    for (LGAIPATHCell2CellLinkID i=0, iend=aipathdb.link_count; i<iend; ++i) {
+        LGAIPATHCellLink *link = &aipathdb.link_array[i];
+        printf("Link %u:\n", i);
+        printf("\tdest: %u\n", link->dest);
+        printf("\tvertex_1: %u\n", link->vertex_1);
+        printf("\tvertex_2: %u\n", link->vertex_2);
+        printf("\tokBits: 0x%02x\n", (uint32)link->okBits);
+        printf("\tcost: %u\n", (uint32)link->cost);
+    }
+    for (LGAIPATHCell2VertexLinkID i=0, iend=aipathdb.cell_vertex_count; i<iend; ++i) {
+        LGAIPATHCell2VertexLink *cell_vertex = &aipathdb.cell_vertex_array[i];
+        printf("Cell vertex %u: %u\n", i, cell_vertex->id);
+    }
+    printf("objhint_count: %u\n", aipathdb.objhint_count);
+    // TODO: more
+
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
+
 int do_dump_brlist(int argc, char **argv, struct command *cmd) {
     if (argc!=1) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
@@ -3549,6 +3780,7 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "top.mis bottom.mis a b c d -o out.mis",  "Merge two worldreps separated by the plane ax+by+cz+d=0." },
+    { "dump_aipath", do_dump_aipath,                "file.mis",             "dump the AIPATH pathfinding db to stdout." },
     { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
