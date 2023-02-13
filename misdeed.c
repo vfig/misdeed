@@ -1350,9 +1350,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     int is_wr = (wr->format==WorldRepFormatWR);
     int is_wrext = (wr->format==WorldRepFormatWREXT);
 
-    dump("%s chunk:\n", tagblock->key.s);
-    dump("  version: %d.%d\n", tagblock->version.major, tagblock->version.minor);
-
     if (is_wrext) {
         LGWREXTHeader ext_header;
         MEM_READ(ext_header, pread);
@@ -1361,12 +1358,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
         assert(! (ext_header.flags&LGWREXTFlagLegacy)); // Don't understand what the flag means yet, so don't allow it.
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, &ext_header);
         wr->flags = ext_header.flags;
-
-        dump("  size: %lu\n", ext_header.size);
-        dump("  wr_version: %lu\n", ext_header.wr_version);
-        dump("  flags: 0x%08x\n", ext_header.flags);
-        dump("  lightmap_format: %ld\n", ext_header.lightmap_format);
-        dump("  lightmap_scale: 0x%08x\n", ext_header.lightmap_scale);
     }
 
     LGWRHeader header;
@@ -1374,8 +1365,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     if (! is_wrext) {
         wr->lightmap_format = _wr_decode_lightmap_format(wr->format, NULL);
     }
-    dump("  cell_alloc_size: %lu\n", header.cell_alloc_size);
-    dump("  cell_count: %lu\n", header.cell_count);
 
     int lightmap_bpp = wr->lightmap_format.lightmap_bpp;
     arrsetlen(wr->cell_array, header.cell_count);
@@ -1386,12 +1375,10 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     uint32 bsp_extraplane_count;
     MEM_READ(bsp_extraplane_count, pread);
     MEM_READ_ARRAY(wr->bsp_extraplane_array, bsp_extraplane_count, pread);
-    dump("  bsp_extraplane_count: %lu\n", bsp_extraplane_count);
 
     uint32 bsp_node_count;
     MEM_READ(bsp_node_count, pread);
     MEM_READ_ARRAY(wr->bsp_node_array, bsp_node_count, pread);
-    dump("  bsp_node_count: %lu\n", bsp_node_count);
 
     if (is_wrext) {
         MEM_READ_ARRAY(wr->cell_weatherzones_array, arrlenu(wr->cell_array), pread);
@@ -1452,7 +1439,6 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
     MEM_READ(csg_cell_count, pread);
     if (csg_cell_count>0) {
         assert(csg_cell_count==arrlenu(wr->cell_array));
-        dump("csg_cell_count: %lu\n", csg_cell_count);
         uint32 csg_brfaces_count = 0;
         for (uint32 i=0, iend=csg_cell_count; i<iend; ++i) {
             uint32 renderpoly_count;
@@ -1463,18 +1449,15 @@ WorldRep *wr_load_from_tagblock(DBTagBlock *tagblock) {
             }
             csg_brfaces_count += renderpoly_count;
         }
-        dump("csg_brfaces_count: %lu\n", csg_brfaces_count);
         assert(csg_brfaces_count!=0);
         MEM_READ_ARRAY(wr->csg_brfaces_array, csg_brfaces_count, pread);
         uint32 csg_brush_count;
         MEM_READ(csg_brush_count, pread);
-        dump("csg_brush_count: %lu\n", csg_brush_count);
         MEM_READ_ARRAY(wr->csg_brush_plane_count_array, csg_brush_count, pread);
         uint32 csg_brush_plane_total_count = 0;
         for (uint32 i=0, iend=arrlenu32(wr->csg_brush_plane_count_array); i<iend; ++i) {
             csg_brush_plane_total_count += wr->csg_brush_plane_count_array[i];
         }
-        dump("csg_brush_plane_total_count: %lu\n", csg_brush_plane_total_count);
         MEM_READ_ARRAY(wr->csg_brush_planes_array, csg_brush_plane_total_count, pread);
         MEM_READ_ARRAY(wr->csg_brush_surfaceref_count_array, csg_brush_count, pread);
         uint32 csg_brush_surfaceref_total_count = 0;
@@ -1674,6 +1657,7 @@ DBFile *dbfile_merge_worldreps(
     LGBRLISTBrush *brlist2 = brlist_load_from_tagblock(
         dbfile_get_tag(dbfile2, TAG_BRLIST));
     LGBRLISTBrush *brushes2 = brlist_sorted_by_id(brlist2);
+    //
     // NOTE: When portalizing, Dromed inserts a new "blockable" brush for every
     //       visibility-blocking door, so that it can guarantee portals that
     //       can be closed when the door is closed. These brushes are appended
@@ -1700,7 +1684,7 @@ DBFile *dbfile_merge_worldreps(
     //       arrays can be merged.
     //
     //       Note that non-terrain brushes, or unused brush ids due to deleted
-    //       brushes might also conribute phantom entries in the lower parts
+    //       brushes might also contribute phantom entries in the lower parts
     //       of the array, but these will not matter.
     //
     int16 br_id_max = brlist_get_id_max(brushes1);
@@ -1719,6 +1703,111 @@ DBFile *dbfile_merge_worldreps(
     wrm->lightmap_format = wr1->lightmap_format;
     wrm->flags = wr1->flags;
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
+
+// NOTE: not yet finished exploring this path (see notes), but
+//       i want to try something else first.
+#if 0
+    // look for a candidate bsp node that separates the worldreps
+    // (there should be (at least) one!)
+    // first, find the maximal Z extents of both worldreps:
+    #define POSINF (9999.0f)
+    #define NEGINF (-9999.0f)
+    LGVector bbmin1 = { POSINF, POSINF, POSINF };
+    LGVector bbmin2 = { POSINF, POSINF, POSINF };
+    LGVector bbmax1 = { NEGINF, NEGINF, NEGINF };
+    LGVector bbmax2 = { NEGINF, NEGINF, NEGINF };
+    for (uint32 i=0, iend=arrlenu32(wr1->cell_array); i<iend; ++i) {
+        WorldRepCell *cell = &wr1->cell_array[i];
+        for (uint32 j=0, jend=arrlenu32(cell->vertex_array); j<jend; ++j) {
+            LGVector vert = cell->vertex_array[j];
+            bbmin1.x = fminf(bbmin1.x, vert.x);
+            bbmin1.y = fminf(bbmin1.y, vert.y);
+            bbmin1.z = fminf(bbmin1.z, vert.z);
+            bbmax1.x = fmaxf(bbmax1.x, vert.x);
+            bbmax1.y = fmaxf(bbmax1.y, vert.y);
+            bbmax1.z = fmaxf(bbmax1.z, vert.z);
+        }
+    }
+    for (uint32 i=0, iend=arrlenu32(wr2->cell_array); i<iend; ++i) {
+        WorldRepCell *cell = &wr2->cell_array[i];
+        for (uint32 j=0, jend=arrlenu32(cell->vertex_array); j<jend; ++j) {
+            LGVector vert = cell->vertex_array[j];
+            bbmin2.x = fminf(bbmin2.x, vert.x);
+            bbmin2.y = fminf(bbmin2.y, vert.y);
+            bbmin2.z = fminf(bbmin2.z, vert.z);
+            bbmax2.x = fmaxf(bbmax2.x, vert.x);
+            bbmax2.y = fmaxf(bbmax2.y, vert.y);
+            bbmax2.z = fmaxf(bbmax2.z, vert.z);
+        }
+    }
+    assert(bbmin1.x<POSINF && bbmin1.y<POSINF && bbmin1.z<POSINF);
+    assert(bbmin2.x<POSINF && bbmin2.y<POSINF && bbmin2.z<POSINF);
+    assert(bbmax1.x>NEGINF && bbmax1.y>NEGINF && bbmax1.z>NEGINF);
+    assert(bbmax2.x>NEGINF && bbmax2.y>NEGINF && bbmax2.z>NEGINF);
+    dump("wr1 aabb min: %f, %f, %f\n", bbmin1.x, bbmin1.y, bbmin1.z);
+    dump("wr1 aabb max: %f, %f, %f\n", bbmax1.x, bbmax1.y, bbmax1.z);
+    dump("wr2 aabb min: %f, %f, %f\n", bbmin2.x, bbmin2.y, bbmin2.z);
+    dump("wr2 aabb max: %f, %f, %f\n", bbmax2.x, bbmax2.y, bbmax2.z);
+    // now, walk the bsp tree of wr1 looking for an axial separating plane
+    for (uint32 i=0, iend=arrlenu32(wr1->bsp_node_array); i<iend; ++i) {
+
+        // TODO: i cant make sense of if this is right or wrong!
+        //       i really need to test on the simplest wrs (so not 7!)
+        //       and cross-check against the cells in dromed to be sure
+        //       of which way the planes face (reversed or not) and
+        //       what the 'inside' and 'outside' mean.
+        //
+        //       i.e. dump_bsp -- remove the depth limit -- on the
+        //       wr, and compare that in dromed with the output
+        //       of this!
+        //
+        //       BUT will have to wait until i have brain again.
+
+        // TODO: should be able to walk the tree, right?
+        //       but i cant think clearly enough for that rn.
+        LGWRBSPNode *node = &wr1->bsp_node_array[i];
+        // only want split nodes where the outside is infinite void
+        dump("Node %u\n", i);
+        if (BSP_IS_LEAF(node)) { dump("\tskip: leaf\n"); continue; }
+        //if (node->outside_index!=BSP_INVALID) { dump("\tskip: has outside\n"); continue; };
+        int32 cell_id = node->plane_cell_id;
+        int32 plane_id = node->plane_id;
+        dump("\tCell %d, plane %d\n", cell_id, plane_id);
+        assert(cell_id>=0); // shouldn't be getting extra planes.
+        WorldRepCell *cell = &wr1->cell_array[cell_id];
+        assert(0<=plane_id && plane_id<arrlen(cell->plane_array));
+        LGWRPlane plane = cell->plane_array[plane_id];
+        // Flip the plane if needed
+        if (BSP_GET_FLAGS(node)&kIsReversed) {
+            plane.normal.x = -plane.normal.x;
+            plane.normal.y = -plane.normal.y;
+            plane.normal.z = -plane.normal.z;
+            plane.distance = -plane.distance;
+            dump("\tflipping heck.\n");
+        }
+        dump("\t%f, %f, %f %f\n", plane.normal.x, plane.normal.y, plane.normal.z, plane.distance);
+        // Check if the plane is axial
+        float EPSILON = 0.00001f;
+        int zerox = (fabsf(plane.normal.x)<EPSILON);
+        int zeroy = (fabsf(plane.normal.y)<EPSILON);
+        int zeroz = (fabsf(plane.normal.z)<EPSILON);
+        if (zerox+zeroy+zeroz!=2) { dump("\tskip: not axial\n"); continue; };
+        // Make sure this plane is at the extremity of wr1
+        float dmin = vdot(plane.normal, bbmin1)+plane.distance;
+        float dmax = vdot(plane.normal, bbmax1)+plane.distance;
+        dump("\tdmin %f, dmax %f\n", dmin, dmax);
+        if (dmin>EPSILON) { dump("\tskip: doesn't contain wr1 aabb min\n"); continue; };
+        if (dmax>EPSILON) { dump("\tskip: doesn't contain wr1 aabb max\n"); continue; };
+        // Make sure this plane excludes wr2:
+        dmin = vdot(plane.normal, bbmin2)+plane.distance;
+        dmax = vdot(plane.normal, bbmax2)+plane.distance;
+        dump("\tdmin %f, dmax %f\n", dmin, dmax);
+        if (dmin<-EPSILON) { dump("\tskip: doesn't exclude wr2 aabb min\n"); continue; };
+        if (dmax<-EPSILON) { dump("\tskip: doesn't exclude wr2 aabb max\n"); continue; };
+        dump("\t> candidate!");
+    }
+    abort_message("Not finished yet!");
+#endif    
 
     // wrm cells := [wr1 cells] [wr2 cells]
     int16 wr1_cell_count = (int16)arrlen(wr1->cell_array);
@@ -1775,6 +1864,20 @@ DBFile *dbfile_merge_worldreps(
         wrm->bsp_node_array[j] = wr1->bsp_node_array[i];
     for (uint32 i=0, j=wr2_bsp_node_start; i<wr2_bsp_node_count; ++i, ++j)
         wrm->bsp_node_array[j] = wr2->bsp_node_array[i];
+
+    // NOTE: doing this does *not* fix the insideoutness of wr2.
+    //       so things are more complicated than i thought.
+#if 0
+    int flip_wr2_planes = 1;
+    if (flip_wr2_planes) {
+        for (uint32 i=wr2_bsp_node_start; i<wr2_bsp_node_end; ++i) {
+            LGWRBSPNode *node = &wrm->bsp_node_array[i];
+            uint8 flags = BSP_GET_FLAGS(node);
+            flags ^= kIsReversed;
+            BSP_SET_FLAGS(node, flags);
+        }
+    }
+#endif
 
     // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
     if (is_wrext) {
@@ -2990,7 +3093,7 @@ void dump_bsp_node_recursive(LGWRBSPNode *nodes, uint32 index) {
 void dump_bsp_graphviz(WorldRep *wr, FILE *f) {
     fprintf(f, "digraph BSP {\n");
     fprintf(f, "  node [shape=record];\n");
-    int maxdepth = 2;
+    int maxdepth = 99999; // was: 2;
     LGWRBSPNode *node_array = wr->bsp_node_array;
     struct frame {
         LGWRBSPNode *node;

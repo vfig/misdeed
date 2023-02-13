@@ -232,3 +232,19 @@ its all failing!
     > got complex enough that one of its slices has two root nodes
     > see if we can get both to do so?
       (maybe we need to swap in/out on our out child or something??)
+
+
+      ....
+
+    MAYBE: instead of grafting in an extra plane an an extra node, we look through mis1's planes/nodes to find one that separates (e.g. one with a matching normal, if i still want to manually specify?); it should be at the edge with an Inside child but no Outside child. and then we _should_ be able to graft in mis2's tree as the Outside child of that node, right???
+    is it that easy?
+      [maybe not... it might be that our inside-outness was caused by having half the island actually in an outside halfspace of some other node... i.e. from some points in the bsp tree it looked like there was _nothing_ out to infinity, when actually there was more level buried in there.
+      (if this is the case, then ^ the above wont help--i dont think? although maaybe it still would??)
+        I DONT KNOW :(  maybe looking at the top/bottom vs base bsp would help understand this relationship though?
+        ...
+        ... ^ still might need to explore this approach. but!
+
+    presumably the insideoutness is because the leaves end up on the wrong side of things. i dont understand how. but maybe looking at a depth-first trace (to some leaf) of the tree will help? maybe also visualising it by exporting all the planes along the way, and the final cell? (would be nice if the problem happened in a simpler case!)
+
+    FAILED: when insideoutness happens, would toggling the reversed flag on all the planes fix it? this is easily tested, as a manual option i guess. if it is a fix, how could we automatically detect the need to do it?
+      => NOPE! this does not fix it (see Dual _combined1b.mis)
