@@ -222,7 +222,9 @@ slice3: File has  2739 cells.
                 -------
                  32817
 
-===========================
+============================================================================
+
+IGNORE ALL THIS CRAP! I AM A FOOL! i was specifying 0 0 1 416 instead of 0 0 1 -416 in the damn batch file
 
 its all failing!
 
@@ -248,3 +250,5 @@ its all failing!
 
     FAILED: when insideoutness happens, would toggling the reversed flag on all the planes fix it? this is easily tested, as a manual option i guess. if it is a fix, how could we automatically detect the need to do it?
       => NOPE! this does not fix it (see Dual _combined1b.mis)
+
+============================================================================

@@ -1704,111 +1704,6 @@ DBFile *dbfile_merge_worldreps(
     wrm->flags = wr1->flags;
     int is_wrext = (wr1->format==WorldRepFormatWREXT);
 
-// NOTE: not yet finished exploring this path (see notes), but
-//       i want to try something else first.
-#if 0
-    // look for a candidate bsp node that separates the worldreps
-    // (there should be (at least) one!)
-    // first, find the maximal Z extents of both worldreps:
-    #define POSINF (9999.0f)
-    #define NEGINF (-9999.0f)
-    LGVector bbmin1 = { POSINF, POSINF, POSINF };
-    LGVector bbmin2 = { POSINF, POSINF, POSINF };
-    LGVector bbmax1 = { NEGINF, NEGINF, NEGINF };
-    LGVector bbmax2 = { NEGINF, NEGINF, NEGINF };
-    for (uint32 i=0, iend=arrlenu32(wr1->cell_array); i<iend; ++i) {
-        WorldRepCell *cell = &wr1->cell_array[i];
-        for (uint32 j=0, jend=arrlenu32(cell->vertex_array); j<jend; ++j) {
-            LGVector vert = cell->vertex_array[j];
-            bbmin1.x = fminf(bbmin1.x, vert.x);
-            bbmin1.y = fminf(bbmin1.y, vert.y);
-            bbmin1.z = fminf(bbmin1.z, vert.z);
-            bbmax1.x = fmaxf(bbmax1.x, vert.x);
-            bbmax1.y = fmaxf(bbmax1.y, vert.y);
-            bbmax1.z = fmaxf(bbmax1.z, vert.z);
-        }
-    }
-    for (uint32 i=0, iend=arrlenu32(wr2->cell_array); i<iend; ++i) {
-        WorldRepCell *cell = &wr2->cell_array[i];
-        for (uint32 j=0, jend=arrlenu32(cell->vertex_array); j<jend; ++j) {
-            LGVector vert = cell->vertex_array[j];
-            bbmin2.x = fminf(bbmin2.x, vert.x);
-            bbmin2.y = fminf(bbmin2.y, vert.y);
-            bbmin2.z = fminf(bbmin2.z, vert.z);
-            bbmax2.x = fmaxf(bbmax2.x, vert.x);
-            bbmax2.y = fmaxf(bbmax2.y, vert.y);
-            bbmax2.z = fmaxf(bbmax2.z, vert.z);
-        }
-    }
-    assert(bbmin1.x<POSINF && bbmin1.y<POSINF && bbmin1.z<POSINF);
-    assert(bbmin2.x<POSINF && bbmin2.y<POSINF && bbmin2.z<POSINF);
-    assert(bbmax1.x>NEGINF && bbmax1.y>NEGINF && bbmax1.z>NEGINF);
-    assert(bbmax2.x>NEGINF && bbmax2.y>NEGINF && bbmax2.z>NEGINF);
-    dump("wr1 aabb min: %f, %f, %f\n", bbmin1.x, bbmin1.y, bbmin1.z);
-    dump("wr1 aabb max: %f, %f, %f\n", bbmax1.x, bbmax1.y, bbmax1.z);
-    dump("wr2 aabb min: %f, %f, %f\n", bbmin2.x, bbmin2.y, bbmin2.z);
-    dump("wr2 aabb max: %f, %f, %f\n", bbmax2.x, bbmax2.y, bbmax2.z);
-    // now, walk the bsp tree of wr1 looking for an axial separating plane
-    for (uint32 i=0, iend=arrlenu32(wr1->bsp_node_array); i<iend; ++i) {
-
-        // TODO: i cant make sense of if this is right or wrong!
-        //       i really need to test on the simplest wrs (so not 7!)
-        //       and cross-check against the cells in dromed to be sure
-        //       of which way the planes face (reversed or not) and
-        //       what the 'inside' and 'outside' mean.
-        //
-        //       i.e. dump_bsp -- remove the depth limit -- on the
-        //       wr, and compare that in dromed with the output
-        //       of this!
-        //
-        //       BUT will have to wait until i have brain again.
-
-        // TODO: should be able to walk the tree, right?
-        //       but i cant think clearly enough for that rn.
-        LGWRBSPNode *node = &wr1->bsp_node_array[i];
-        // only want split nodes where the outside is infinite void
-        dump("Node %u\n", i);
-        if (BSP_IS_LEAF(node)) { dump("\tskip: leaf\n"); continue; }
-        //if (node->outside_index!=BSP_INVALID) { dump("\tskip: has outside\n"); continue; };
-        int32 cell_id = node->plane_cell_id;
-        int32 plane_id = node->plane_id;
-        dump("\tCell %d, plane %d\n", cell_id, plane_id);
-        assert(cell_id>=0); // shouldn't be getting extra planes.
-        WorldRepCell *cell = &wr1->cell_array[cell_id];
-        assert(0<=plane_id && plane_id<arrlen(cell->plane_array));
-        LGWRPlane plane = cell->plane_array[plane_id];
-        // Flip the plane if needed
-        if (BSP_GET_FLAGS(node)&kIsReversed) {
-            plane.normal.x = -plane.normal.x;
-            plane.normal.y = -plane.normal.y;
-            plane.normal.z = -plane.normal.z;
-            plane.distance = -plane.distance;
-            dump("\tflipping heck.\n");
-        }
-        dump("\t%f, %f, %f %f\n", plane.normal.x, plane.normal.y, plane.normal.z, plane.distance);
-        // Check if the plane is axial
-        float EPSILON = 0.00001f;
-        int zerox = (fabsf(plane.normal.x)<EPSILON);
-        int zeroy = (fabsf(plane.normal.y)<EPSILON);
-        int zeroz = (fabsf(plane.normal.z)<EPSILON);
-        if (zerox+zeroy+zeroz!=2) { dump("\tskip: not axial\n"); continue; };
-        // Make sure this plane is at the extremity of wr1
-        float dmin = vdot(plane.normal, bbmin1)+plane.distance;
-        float dmax = vdot(plane.normal, bbmax1)+plane.distance;
-        dump("\tdmin %f, dmax %f\n", dmin, dmax);
-        if (dmin>EPSILON) { dump("\tskip: doesn't contain wr1 aabb min\n"); continue; };
-        if (dmax>EPSILON) { dump("\tskip: doesn't contain wr1 aabb max\n"); continue; };
-        // Make sure this plane excludes wr2:
-        dmin = vdot(plane.normal, bbmin2)+plane.distance;
-        dmax = vdot(plane.normal, bbmax2)+plane.distance;
-        dump("\tdmin %f, dmax %f\n", dmin, dmax);
-        if (dmin<-EPSILON) { dump("\tskip: doesn't exclude wr2 aabb min\n"); continue; };
-        if (dmax<-EPSILON) { dump("\tskip: doesn't exclude wr2 aabb max\n"); continue; };
-        dump("\t> candidate!");
-    }
-    abort_message("Not finished yet!");
-#endif    
-
     // wrm cells := [wr1 cells] [wr2 cells]
     int16 wr1_cell_count = (int16)arrlen(wr1->cell_array);
     int16 wr2_cell_count = (int16)arrlen(wr2->cell_array);
@@ -1864,20 +1759,6 @@ DBFile *dbfile_merge_worldreps(
         wrm->bsp_node_array[j] = wr1->bsp_node_array[i];
     for (uint32 i=0, j=wr2_bsp_node_start; i<wr2_bsp_node_count; ++i, ++j)
         wrm->bsp_node_array[j] = wr2->bsp_node_array[i];
-
-    // NOTE: doing this does *not* fix the insideoutness of wr2.
-    //       so things are more complicated than i thought.
-#if 0
-    int flip_wr2_planes = 1;
-    if (flip_wr2_planes) {
-        for (uint32 i=wr2_bsp_node_start; i<wr2_bsp_node_end; ++i) {
-            LGWRBSPNode *node = &wrm->bsp_node_array[i];
-            uint8 flags = BSP_GET_FLAGS(node);
-            flags ^= kIsReversed;
-            BSP_SET_FLAGS(node, flags);
-        }
-    }
-#endif
 
     // wrm cell-weatherzones := [wr1 cell-weatherzones] [wr2 cell-weatherzones]
     if (is_wrext) {
