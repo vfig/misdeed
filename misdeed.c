@@ -498,7 +498,7 @@ typedef enum LGBrushShape {
     BRSHAPE_PYRAMID = 2,
     BRSHAPE_APEX_PYRAMID = 3,
     BRSHAPE_DODECAHEDRON = 4,
-    BRSHAPE_WEDGE = 7,
+    BRSHAPE_WEDGE = 5,
 
     BRSHAPE_INVALID = -1,
 } LGBrushShape;
