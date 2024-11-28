@@ -1065,6 +1065,11 @@ LGVector vcross(LGVector a, LGVector b) {
     return o;
 }
 
+float vdist_sq(LGVector a, LGVector b) {
+    LGVector d = vadd(a, vneg(b));
+    return vdot(d, d);
+}
+
 /** Forward declarations */
 
 LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock);
@@ -3890,6 +3895,142 @@ int do_dump_cell_lights(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+static float32 fcl_cell_radius;
+static LGVector fcl_cell_center;
+static LGWRRGBLight *fcl_light_array;
+
+static int fcl_compare_light_indexes(const int16 *a, const int16 *b) {
+    // Sunlight index is always first.
+    if (*a==0) return -1;
+    if (*b==0) return 1;
+    // Okay let's calculate distances!
+    LGVector loc_a = fcl_light_array[*a].location;
+    LGVector loc_b = fcl_light_array[*b].location;
+    float dist_sq_a = vdist_sq(loc_a, fcl_cell_center);
+    float dist_sq_b = vdist_sq(loc_b, fcl_cell_center);
+    if (dist_sq_a<dist_sq_b)
+        return -1;
+    else if (dist_sq_a>dist_sq_b)
+        return 1;
+    else
+        return 0;
+}
+
+static int fcl_light_reaches_cell(int16 a) {
+    // Sunlight index always counts.
+    if (a==0) return 1;
+    // Check the light radius. A zero (=infinite) radius always counts.
+    float light_rad = fcl_light_array[a].radius;
+    float light_rad_sq = light_rad*light_rad;
+    if (light_rad==0.0) return 1;
+    // Okay let's calculate distances!
+    LGVector loc = fcl_light_array[a].location;
+    float dist_sq = vdist_sq(loc, fcl_cell_center);
+    float cell_rad_sq = fcl_cell_radius*fcl_cell_radius;
+    if (dist_sq>(cell_rad_sq+light_rad_sq))
+        return 0;
+    return 1;
+}
+
+DBFile *dbfile_fixup_cell_lights(DBFile *dbfile)
+{
+    // Load the worldrep.
+    WorldRep *wr = wr_load_from_tagblock(dbfile_get_wr_tagblock(dbfile));
+
+    for (uint32 i=0, iend=arrlenu32(wr->cell_array); i<iend; ++i) {
+        WorldRepCell *cell = &wr->cell_array[i];
+
+        // Comparator needs to know the light array and the cell center.
+        fcl_cell_radius = cell->header.sphere_radius;
+        fcl_light_array = wr->light_array;
+        fcl_cell_center = cell->header.sphere_center;
+
+        // BEWARE: light_index_array[0] -- yes, even on disk -- is the number
+        //         of indices (excluding itself).
+
+        // Sort light indexes (except sunlight) by increasing distance.
+        int16 *arr = cell->light_index_array;
+        uint32 count = arrlenu32(arr);
+        qsort(arr+1, count-1, sizeof(*arr), fcl_compare_light_indexes);
+
+        // if (arrlenu32(a)>96) {
+        //     arrsetlen(a, 96);
+        // }
+
+        // Okay we are gonna cut off any lights that don't reach the cell.
+
+        uint32 max_reachable_index = 0;
+        for (uint32 l=1; l<count; ++l) {
+            if (fcl_light_reaches_cell(arr[l])) {
+                max_reachable_index = l;
+            }
+        }
+        uint32 new_count = max_reachable_index+1;
+        if (new_count<count) {
+            dump("Cell %d: light table reduced from %u to %u\n",
+                i, count, new_count);
+            arrsetlen(arr, new_count);
+            arr[0] = (int16)(new_count-1);
+        }
+    }
+
+    // Write the output file.
+
+    DBFile *dbfile_out = calloc(1, sizeof(DBFile));
+    dbfile_out->version = (LGDBVersion){ 0, 1 };
+
+    // Copy all other tagblocks from the first file into the output.
+    for (int i=0, iend=dbfile_tag_count(dbfile); i<iend; ++i) {
+        DBTagBlock *src_tagblock = dbfile_tag_at_index(dbfile, i);
+
+        // Skip the tagblocks that we modified.
+        if (tag_name_eq_str(src_tagblock->key, TAG_WR)
+        || tag_name_eq_str(src_tagblock->key, TAG_WRRGB)
+        || tag_name_eq_str(src_tagblock->key, TAG_WREXT))
+            continue;
+
+        DBTagBlock dest_tagblock = {0};
+        dbtagblock_copy(&dest_tagblock, src_tagblock);
+        hmputs(dbfile_out->tagblock_hash, dest_tagblock);
+    }
+
+    // Write the modified worldrep to the output.
+    {
+        DBTagBlock tagblock = {0};
+        wr_save_to_tagblock(&tagblock, wr);
+        hmputs(dbfile_out->tagblock_hash, tagblock);
+    }
+
+    return dbfile_out;
+}
+
+int do_fixup_cell_lights(int argc, char **argv, struct command *cmd) {
+    // Sort each cell's light_index_array by ascending distance (keeping
+    // sunlight at the top if it is present).
+    //
+    // in.mis -o out.mis
+    if (argc!=3
+    || strcmp(argv[1], "-o")!=0) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+
+    char *in_filename = argv[0];
+    char *out_filename = argv[2];
+
+    dump("File: \"%s\"\n", in_filename);
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBFile *dbfile_out = dbfile_fixup_cell_lights(dbfile);
+    dbfile_save(dbfile_out, out_filename);
+    dump("Wrote: \"%s\"\n", out_filename);
+
+    // and clean up maybe?
+
+    dbfile = dbfile_free(dbfile);
+    dbfile_out = dbfile_free(dbfile_out);
+    dump("Ok.\n");
+    return 0;
+}
+
 struct command all_commands[] = {
     { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
     { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
@@ -3899,6 +4040,7 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "top.mis bottom.mis a b c d -o out.mis",  "Merge two worldreps separated by the plane ax+by+cz+d=0." },
+    { "fixup_cell_lights", do_fixup_cell_lights,    "file.mis -o out.mis",  "fix bug with bad object lighting." },
     { "dump_aipath", do_dump_aipath,                "file.mis",             "dump the AIPATH pathfinding db to stdout." },
     { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
