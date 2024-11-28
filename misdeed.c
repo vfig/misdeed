@@ -142,6 +142,8 @@ static const char DEADBEEF[4] = {0xDE,0xAD,0xBE,0xEF};
 #define TAG_FAMILY  "FAMILY"
 #define TAG_TXLIST  "TXLIST"
 #define TAG_WEATHER "WEATHER"
+#define TAG_PROP_POSITION "P$Position"
+#define TAG_PROP_LIGHT "P$Light"
 #define TAG_PROP_ANIMLIGHT "P$AnimLight"
 
 typedef struct LGVector {
@@ -699,6 +701,22 @@ typedef struct LGPropHeader {
     uint32  size;
 } LGPropHeader;
 
+typedef struct LGLocation {
+    LGVector vec;
+    int16 cell; // always -1 on disk
+    int16 hint; // always -1 on disk
+} LGLocation;
+
+typedef struct LGPosition {
+   LGLocation loc;
+   LGAngleVector fac;
+} LGPosition;
+
+typedef struct LGPositionProp {
+    LGPropHeader header;
+    LGPosition prop;
+} LGPositionProp;
+
 typedef struct LGBaseLight {
     float32 brightness;
     LGVector offset;
@@ -726,7 +744,7 @@ typedef struct LGAnimLightAnimation {
 typedef struct LGAnimLight76 {
     LGBaseLight base;
     LGAnimLightAnimation animation;
-    float radius;
+    float32 radius;
     int32 notify_script_objid;
     bool32 quad;
     float32 inner_radius;
@@ -737,6 +755,13 @@ typedef struct LGAnimLight80 {
     bool32 is_dynamic;      // New in NewDark
 } LGAnimLight80;
 
+typedef struct LGLight {
+    LGBaseLight base;
+    float32 radius;
+    bool32 quad;
+    float32 inner_radius;
+} LGLight;
+
 typedef struct LGAnimLightProp76 {
     LGPropHeader header;
     LGAnimLight76 prop;
@@ -746,6 +771,11 @@ typedef struct LGAnimLightProp80 {
     LGPropHeader header;
     LGAnimLight80 prop;
 } LGAnimLightProp80;
+
+typedef struct LGLightProp {
+    LGPropHeader header;
+    LGLight prop;
+} LGLightProp;
 
 #pragma pack(pop)
 
@@ -1034,6 +1064,11 @@ LGVector vcross(LGVector a, LGVector b) {
     o.z = a.x*b.y - a.y*b.x;
     return o;
 }
+
+/** Forward declarations */
+
+LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock);
+LGLightProp *light_prop_load_from_tagblock(DBTagBlock *tagblock);
 
 /** Weather stuff */
 
@@ -1633,8 +1668,6 @@ void wr_save_to_tagblock(DBTagBlock *tagblock, WorldRep *wr) {
     memcpy(tagblock->data, buffer, size);
     free(buffer);
 }
-
-LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock);
 
 DBFile *dbfile_merge_worldreps(
     DBFile *dbfile1,
@@ -2731,6 +2764,25 @@ LGAnimLightProp80 *animlight_prop_load_from_tagblock(DBTagBlock *tagblock) {
     return array;
 }
 
+LGLightProp *light_prop_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tag_name_eq_str(tagblock->key, TAG_PROP_LIGHT));
+    LGLightProp *array = NULL;
+    assert(DBTAGBLOCK_PROP_VERSION_MAJOR(tagblock)==2
+        && DBTAGBLOCK_PROP_VERSION_MINOR(tagblock)==0
+        && DBTAGBLOCK_PROP_ITEM_SIZE(tagblock)==sizeof(LGLight));
+    DBTAGBLOCK_READ_ARRAY(array, tagblock);
+    return array;
+}
+
+LGPositionProp *position_prop_load_from_tagblock(DBTagBlock *tagblock) {
+    assert(tag_name_eq_str(tagblock->key, TAG_PROP_POSITION));
+    LGPositionProp *array = NULL;
+    assert(DBTAGBLOCK_PROP_VERSION_MAJOR(tagblock)==2
+        && DBTAGBLOCK_PROP_VERSION_MINOR(tagblock)==1
+        && DBTAGBLOCK_PROP_ITEM_SIZE(tagblock)==sizeof(LGPosition));
+    DBTAGBLOCK_READ_ARRAY(array, tagblock);
+    return array;
+}
 
 /** Commands and stuff */
 
@@ -3754,6 +3806,89 @@ int do_dump_animlight(int argc, char **argv, struct command *cmd) {
     return 0;
 }
 
+int do_dump_cell_lights(int argc, char **argv, struct command *cmd) {
+    // Dump all the brush lights, light objects, and anim lights reaching
+    // the given cell.
+    if (argc!=2) {
+        abort_format("Usage: %s %s", cmd->s, cmd->args);
+    }
+    uint32 cell_id = (uint32)atoi(argv[1]);
+
+    char *in_filename = argv[0];
+    DBFile *dbfile = dbfile_load(in_filename);
+    DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
+    WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
+
+    LGBRLISTBrush *brlist = brlist_load_from_tagblock(
+        dbfile_get_tag(dbfile, TAG_BRLIST));
+    int16 br_id_max = brlist_get_id_max(brlist);
+    //arrfree(brlist);
+
+    DBTagBlock *tagblock_position = dbfile_get_tag(dbfile, TAG_PROP_POSITION);
+    LGPositionProp *position_prop_array = position_prop_load_from_tagblock(tagblock_position);
+    DBTagBlock *tagblock_light = dbfile_get_tag(dbfile, TAG_PROP_LIGHT);
+    LGLightProp *light_prop_array = light_prop_load_from_tagblock(tagblock_light);
+    DBTagBlock *tagblock_animlight = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
+    LGAnimLightProp80 *animlight_prop_array = animlight_prop_load_from_tagblock(tagblock_animlight);
+
+    // Build some lookup tables.
+
+    typedef struct ObjIdToIndex {
+        int32 key;
+        int32 value;
+    } ObjIdToIndex;
+
+    ObjIdToIndex *positionindex_by_objid = NULL;
+    hmdefault(positionindex_by_objid, -1);
+    for (uint32 i=0, iend=arrlenu32(position_prop_array); i<iend; ++i) {
+        hmput(positionindex_by_objid, position_prop_array[i].header.id, i);
+    }
+
+    ObjIdToIndex *lightindex_by_objid = NULL;
+    hmdefault(lightindex_by_objid, -1);
+    for (uint32 i=0, iend=arrlenu32(light_prop_array); i<iend; ++i) {
+        hmput(lightindex_by_objid, light_prop_array[i].header.id, i);
+    }
+
+    typedef struct PositionToLightObjId {
+        LGVector key;
+        int32 value;
+    } PositionToLightObjId;
+
+    PositionToLightObjId *lightobjid_by_position = NULL;
+    hmdefault(lightobjid_by_position, 0);
+    for (uint32 li=0, liend=arrlenu32(light_prop_array); li<liend; ++li) {
+        int32 objid = light_prop_array[li].header.id;
+        int32 pos_index = hmget(positionindex_by_objid, objid);
+        assert(pos_index!=-1);
+        LGVector pos = position_prop_array[pos_index].prop.loc.vec;
+        hmput(lightobjid_by_position, pos, objid);
+    }
+
+    // Now let's figure out which light objects are seeing this cell.
+
+    assert(cell_id<arrlenu32(wr->cell_array));
+    WorldRepCell *cell = &wr->cell_array[cell_id];
+
+    printf("CELL %u, %u static lights:\n", cell_id, arrlenu32(cell->light_index_array));
+    for (uint32 i=0, iend=arrlenu32(cell->light_index_array); i<iend; ++i) {
+        int16 index = cell->light_index_array[i];
+        LGWRRGBLight *l = &wr->light_array[index];
+
+        int32 light_objid = hmget(lightobjid_by_position, l->location);
+        //assert(light_objid!=0);
+
+        printf("%3d. light_index:%-4d\tobjid:%-4d\tpos:(%f %f %f) bright:(%f %f %f) radius:%f\n",
+            i, index, light_objid,
+            l->location.x, l->location.y, l->location.z,
+            l->bright.x, l->bright.y, l->bright.z,
+            l->radius);
+    }
+
+    wr_free(&wr);
+    dbfile = dbfile_free(dbfile);
+    return 0;
+}
 
 struct command all_commands[] = {
     { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
@@ -3771,6 +3906,7 @@ struct command all_commands[] = {
     { "dump_wr", do_dump_wr,                        "file.mis",             "dump the WR to stdout." },
     { "dump_animlight", do_dump_animlight,          "file.mis",             "dump animlight table to stdout." },
     { "dump_wrlight", do_dump_wrlight,              "file.mis",             "dump WR light data table." },
+    { "dump_cell_lights", do_dump_cell_lights,      "file.mis cellid",      "dump cell light info." },
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
     { NULL, NULL },
 };
