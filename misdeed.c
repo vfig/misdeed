@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Define this to build a tool with only the "fixup_cell_lights" command.
+//#define TOOL_FIXUP_CELL_LIGHTS
+
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
@@ -4031,6 +4034,7 @@ int do_fixup_cell_lights(int argc, char **argv, struct command *cmd) {
 
 struct command all_commands[] = {
     { "help", do_help,                              "[command]",            "List available commands; show help for a command." },
+#ifndef TOOL_FIXUP_CELL_LIGHTS
     { "tag_list", do_tag_list,                      "file.mis",             "List all tagblocks." },
     { "tag_dump", do_tag_dump,                      "file.mis tag",         "Dump tagblock to file." },
     { "fam_list", do_fam_list,                      "file.mis",             "List loaded families." },
@@ -4038,16 +4042,21 @@ struct command all_commands[] = {
     { "test_worldrep", do_test_worldrep,            "file.mis",             "Test reading and writing (to memory) the worldrep." },
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "top.mis bottom.mis a b c d -o out.mis",  "Merge two worldreps separated by the plane ax+by+cz+d=0." },
+#endif
     { "fixup_cell_lights", do_fixup_cell_lights,    "file.mis -o out.mis",  "fix bug with bad object lighting." },
+#ifndef TOOL_FIXUP_CELL_LIGHTS
     { "dump_aipath", do_dump_aipath,                "file.mis",             "dump the AIPATH pathfinding db to stdout." },
     { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
+#endif
     { "dump_wr", do_dump_wr,                        "file.mis",             "dump the WR to stdout." },
     { "dump_animlight", do_dump_animlight,          "file.mis",             "dump animlight table to stdout." },
     { "dump_wrlight", do_dump_wrlight,              "file.mis",             "dump WR light data table." },
     { "dump_cell_lights", do_dump_cell_lights,      "file.mis cellid",      "dump cell light info." },
+#ifndef TOOL_FIXUP_CELL_LIGHTS
     { "bsp_sanity_check", do_bsp_sanity_check,      "file.mis",             "do a BSP sanity check." },
+#endif
     { NULL, NULL },
 };
 
