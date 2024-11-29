@@ -3953,19 +3953,15 @@ DBFile *dbfile_fixup_cell_lights(DBFile *dbfile)
         uint32 count = arrlenu32(arr);
         qsort(arr+1, count-1, sizeof(*arr), fcl_compare_light_indexes);
 
-        // if (arrlenu32(a)>96) {
-        //     arrsetlen(a, 96);
-        // }
-
-        // Okay we are gonna cut off any lights that don't reach the cell.
-
-        uint32 max_reachable_index = 0;
+        // Okay we are gonna filter out any lights that can't reach the cell.
+        int16 *r = &arr[1];
+        int16 *w = r;
         for (uint32 l=1; l<count; ++l) {
-            if (fcl_light_reaches_cell(arr[l])) {
-                max_reachable_index = l;
-            }
+            if (fcl_light_reaches_cell(*r))
+                *w++ = *r;
+            ++r;
         }
-        uint32 new_count = max_reachable_index+1;
+        uint32 new_count = (uint32)(w-arr);
         if (new_count<count) {
             dump("Cell %d: light table reduced from %u to %u\n",
                 i, count, new_count);
