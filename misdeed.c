@@ -3826,17 +3826,17 @@ int do_dump_cell_lights(int argc, char **argv, struct command *cmd) {
     DBTagBlock *wr_tagblock = dbfile_get_wr_tagblock(dbfile);
     WorldRep *wr = wr_load_from_tagblock(wr_tagblock);
 
-    LGBRLISTBrush *brlist = brlist_load_from_tagblock(
-        dbfile_get_tag(dbfile, TAG_BRLIST));
-    int16 br_id_max = brlist_get_id_max(brlist);
+    // LGBRLISTBrush *brlist = brlist_load_from_tagblock(
+    //     dbfile_get_tag(dbfile, TAG_BRLIST));
+    //int16 br_id_max = brlist_get_id_max(brlist);
     //arrfree(brlist);
 
     DBTagBlock *tagblock_position = dbfile_get_tag(dbfile, TAG_PROP_POSITION);
     LGPositionProp *position_prop_array = position_prop_load_from_tagblock(tagblock_position);
     DBTagBlock *tagblock_light = dbfile_get_tag(dbfile, TAG_PROP_LIGHT);
     LGLightProp *light_prop_array = light_prop_load_from_tagblock(tagblock_light);
-    DBTagBlock *tagblock_animlight = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
-    LGAnimLightProp80 *animlight_prop_array = animlight_prop_load_from_tagblock(tagblock_animlight);
+    // DBTagBlock *tagblock_animlight = dbfile_get_tag(dbfile, TAG_PROP_ANIMLIGHT);
+    // LGAnimLightProp80 *animlight_prop_array = animlight_prop_load_from_tagblock(tagblock_animlight);
 
     // Build some lookup tables.
 
