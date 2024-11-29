@@ -4043,7 +4043,7 @@ struct command all_commands[] = {
     { "test_write_minimal", do_test_write_minimal,  "input.mis",            "Test writing a minimal dbfile." },
     { "merge", do_merge,                            "top.mis bottom.mis a b c d -o out.mis",  "Merge two worldreps separated by the plane ax+by+cz+d=0." },
 #endif
-    { "fixup_cell_lights", do_fixup_cell_lights,    "file.mis -o out.mis",  "fix bug with bad object lighting." },
+    { "fixup_cell_lights", do_fixup_cell_lights,    "file.mis -o out.mis",  "trim cell lights for perf boost; fix bad object lighting." },
 #ifndef TOOL_FIXUP_CELL_LIGHTS
     { "dump_aipath", do_dump_aipath,                "file.mis",             "dump the AIPATH pathfinding db to stdout." },
     { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
@@ -4086,6 +4086,7 @@ int do_help(int argc, char **argv, struct command *cmd) {
 }
 
 int main(int argc, char **argv) {
+    dump("Misdeed version 0.1.0 alpha, by vfig.\n");
     if (argc<2) {
         abort_format("Usage: %s command ...\nUse 'help' to see all commands.\n", argv[0]);
     }
