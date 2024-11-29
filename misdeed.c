@@ -904,6 +904,7 @@ static void dbtagblock_write_array(
 DBFile *dbfile_load(const char *filename) {
     DBFile *dbfile = calloc(1, sizeof(DBFile));
     FILE *file = fopen(filename, "rb");
+    if (! file) abort_format("Cannot read file: %s\n", filename);
     assert(file);
 
     LGDBFileHeader header;
@@ -955,6 +956,7 @@ void dbfile_save(DBFile *dbfile, const char *filename) {
     filename_append_str(&temp_filename, "~tmp");
 
     FILE *file = fopen(temp_filename.s, "wb");
+    if (! file) abort_format("Cannot write file: %s\n", filename);
     assert(file);
     #define WRITE_SIZE(buf, size) \
         do { \
