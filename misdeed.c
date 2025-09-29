@@ -3625,8 +3625,8 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
         "wedge",
     };
     static const char *brush_align_s[] = {
-        "by sides",
         "by vertices",
+        "by sides",
     };
     static const char *brush_medium_s[] = {
         "solid",
