@@ -3589,10 +3589,21 @@ int do_dump_aipath(int argc, char **argv, struct command *cmd) {
 }
 
 int do_dump_brlist(int argc, char **argv, struct command *cmd) {
-    if (argc!=1) {
+    if (argc<1 || argc>2) {
         abort_format("Usage: %s %s", cmd->s, cmd->args);
     }
-    char *in_filename = argv[0];
+    char *in_filename;
+    int json_output = 0;
+    if (strcmp(argv[0], "-j")==0) {
+        in_filename = argv[1];
+        json_output = 1;
+    } else {
+        in_filename = argv[0];
+    }
+
+    #define txtf(...) if (!json_output) printf(__VA_ARGS__)
+    #define jsonf(...) if (json_output) printf(__VA_ARGS__)
+
     DBFile *dbfile = dbfile_load(in_filename);
     DBTagBlock *tagblock = dbfile_get_tag(dbfile, TAG_BRLIST);
     LGBRLISTBrush *brlist = brlist_load_from_tagblock(tagblock);
@@ -3630,39 +3641,69 @@ int do_dump_brlist(int argc, char **argv, struct command *cmd) {
         "blockable",
     };
 
+    jsonf("[\n");
     for (uint32 i=0, iend=arrlenu32(brlist); i<iend; ++i) {
         LGBRLISTBrush br = brlist[i];
-        printf("Brush %d, time %u:\n", (int)br.br_id, i);
+        txtf("Brush %d, time %u:\n", (int)br.br_id, i);
+        jsonf("{\n");
+        jsonf("\t\"brush_id\": %d,\n", (int)br.br_id);
+        jsonf("\t\"time\": %d,\n", i);
         int type = LGBRUSH_GET_TYPE(br);
         assert(type!=BRTYPE_INVALID);
-        printf("\ttype: %d %s\n", type, brush_type_s[type]);
+        txtf("\ttype: %d %s\n", type, brush_type_s[type]);
+        jsonf("\t\"type\": %d,\n", type);
+        jsonf("\t\"type_name\": \"%s\",\n", brush_type_s[type]);
         if (type==BRTYPE_TERRAIN) {
             int shape = LGBRUSH_GET_TERR_SHAPE(br);
             assert(shape!=BRSHAPE_INVALID);
-            printf("\tshape: %d %s\n", type, brush_shape_s[shape]);
+            txtf("\tshape: %d %s\n", shape, brush_shape_s[shape]);
+            jsonf("\t\"shape\": %d,\n", shape);
+            jsonf("\t\"shape_name\": \"%s\",\n", brush_shape_s[shape]);
             int sides = LGBRUSH_GET_TERR_SIDES(br);
-            printf("\tsides: %d\n", sides);
+            txtf("\tsides: %d\n", sides);
+            jsonf("\t\"sides\": %d,\n", sides);
             int medium = LGBRUSH_GET_MEDIUM(br);
-            printf("\tmedium: %d %s\n", medium, brush_medium_s[medium]);
+            txtf("\tmedium: %d %s\n", medium, brush_medium_s[medium]);
+            jsonf("\t\"medium\": %d,\n", medium);
+            jsonf("\t\"medium_name\": \"%s\",\n", brush_medium_s[medium]);
         }
         int align = LGBRUSH_GET_ALIGN(br);
-        printf("\talign: %d %s\n", type, brush_align_s[align]);
-        printf("\tposition: %f %f %f\n", br.pos.x, br.pos.y, br.pos.z);
-        printf("\tfacing: %04x %04x %04x\n", br.ang.x, br.ang.y, br.ang.z);
-        printf("\tsize: %f %f %f\n", br.sz.x, br.sz.y, br.sz.z);
+        txtf("\talign: %d %s\n", type, brush_align_s[align]);
+        jsonf("\t\"align\": %d,\n", align);
+        jsonf("\t\"align_name\": \"%s\",\n", brush_align_s[align]);
+        txtf("\tposition: %f %f %f\n", br.pos.x, br.pos.y, br.pos.z);
+        jsonf("\t\"position\": [%f,%f,%f],\n", br.pos.x, br.pos.y, br.pos.z);
+        txtf("\tfacing: %04x %04x %04x\n", br.ang.x, br.ang.y, br.ang.z);
+        jsonf("\t\"facing\": [%d,%d,%d],\n", br.ang.x, br.ang.y, br.ang.z);
+        txtf("\tsize: %f %f %f\n", br.sz.x, br.sz.y, br.sz.z);
+        jsonf("\t\"size\": [%f,%f,%f],\n", br.sz.x, br.sz.y, br.sz.z);
+        txtf("\ttex %d\n", (int)br.terr_tx_id);
+        jsonf("\t\"tex\": %d,\n", (int)br.terr_tx_id);
         // TODO: other fields!
         int face_count = LGBRUSH_GET_FACE_COUNT(br);
-        printf("\tface_count: %d\n", face_count);
+        txtf("\tface_count: %d\n", face_count);
+        jsonf("\t\"face_count\": %d,\n", face_count);
+        jsonf("\t\"faces\": [\n");
         for (uint32 j=0, jend=face_count; j<jend; ++j) {
             LGBRLISTFace *face = &br.faces[j];
-            printf("\t\t%u: tex %d\n", j, (int)face->tx_id);
+            jsonf("\t{\n");
+            txtf("\t\t%u: tex %d\n", j, (int)face->tx_id);
+            jsonf("\t\t\"tex\": %d\n", (int)face->tx_id); // NOTE: no trailing comma
             // TODO: other face details!
+            jsonf("\t}%s\n", (j<jend-1)?",":"");
         }
+        jsonf("\t]\n"); // NOTE: no trailing comma
+
+        jsonf("}%s\n", (i<iend-1)?",":"");
     }
+    jsonf("]\n");
 
     arrfree(brlist);
     dbfile = dbfile_free(dbfile);
     return 0;
+
+    #undef txtf
+    #undef jsonf
 }
 
 int do_bsp_sanity_check(int argc, char **argv, struct command *cmd) {
@@ -4046,7 +4087,7 @@ struct command all_commands[] = {
     { "fixup_cell_lights", do_fixup_cell_lights,    "file.mis -o out.mis",  "trim cell lights for perf boost; fix bad object lighting." },
 #ifndef TOOL_FIXUP_CELL_LIGHTS
     { "dump_aipath", do_dump_aipath,                "file.mis",             "dump the AIPATH pathfinding db to stdout." },
-    { "dump_brlist", do_dump_brlist,                "file.mis",             "dump the BRLIST to stdout." },
+    { "dump_brlist", do_dump_brlist,                "[-j] file.mis",             "dump the BRLIST to stdout (-j for json)." },
     { "dump_bsp", do_dump_bsp,                      "file.mis -o out.dot",  "dump the BSP tree to graphviz .DOT." },
     { "dump_obj", do_dump_obj,                      "file.mis -o out.obj",  "dump the WR and BSP to wavefront .OBJ." },
 #endif
